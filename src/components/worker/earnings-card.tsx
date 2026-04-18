@@ -1,11 +1,18 @@
 "use client";
 
+import * as React from "react";
 import { Area, AreaChart, ResponsiveContainer, Tooltip } from "recharts";
 import { ArrowUpRight, WalletCards } from "lucide-react";
 import { formatCurrency } from "@/src/lib/format";
 import type { Earnings } from "@/src/types/worker";
 
 export function EarningsCard({ earnings }: { earnings: Earnings }) {
+  const [mounted, setMounted] = React.useState(false);
+
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
+
   return (
     <section className="rounded-lg border border-white/10 bg-white/[0.055] p-5 shadow-[0_24px_80px_rgba(0,0,0,0.24)]">
       <div className="flex items-start justify-between">
@@ -18,19 +25,23 @@ export function EarningsCard({ earnings }: { earnings: Earnings }) {
           <WalletCards className="h-5 w-5" />
         </div>
       </div>
-      <div className="mt-5 h-32">
-        <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={earnings.history} margin={{ left: 0, right: 0, top: 8, bottom: 0 }}>
-            <defs>
-              <linearGradient id="earningsFill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#fde68a" stopOpacity={0.5} />
-                <stop offset="95%" stopColor="#fde68a" stopOpacity={0.02} />
-              </linearGradient>
-            </defs>
-            <Tooltip contentStyle={{ background: "#101210", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8, color: "#fff" }} />
-            <Area type="monotone" dataKey="amount" stroke="#fde68a" strokeWidth={2} fill="url(#earningsFill)" />
-          </AreaChart>
-        </ResponsiveContainer>
+      <div className="mt-5 h-32 min-h-32">
+        {mounted ? (
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={earnings.history} margin={{ left: 0, right: 0, top: 8, bottom: 0 }}>
+              <defs>
+                <linearGradient id="earningsFill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#fde68a" stopOpacity={0.5} />
+                  <stop offset="95%" stopColor="#fde68a" stopOpacity={0.02} />
+                </linearGradient>
+              </defs>
+              <Tooltip contentStyle={{ background: "#101210", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8, color: "#fff" }} />
+              <Area type="monotone" dataKey="amount" stroke="#fde68a" strokeWidth={2} fill="url(#earningsFill)" />
+            </AreaChart>
+          </ResponsiveContainer>
+        ) : (
+          <div className="h-full rounded-lg border border-white/10 bg-white/[0.035]" />
+        )}
       </div>
       <div className="mt-4 grid grid-cols-3 gap-3">
         <MiniStat label="Today" value={formatCurrency(earnings.today)} />

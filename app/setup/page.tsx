@@ -11,10 +11,6 @@ export default function SetupPage() {
   const router = useRouter();
   const { state, dispatch, registerMachine } = useWorker();
 
-  function update(settings: Parameters<typeof dispatch>[0] extends infer Action ? never : never) {
-    void settings;
-  }
-
   return (
     <main className="min-h-screen bg-[#080a09] px-5 py-8 text-white">
       <div className="fixed inset-0 bg-[radial-gradient(circle_at_top_left,rgba(16,185,129,0.16),transparent_36%),linear-gradient(135deg,#080a09,#080a09_65%,#160f09)]" />
