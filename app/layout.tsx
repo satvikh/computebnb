@@ -1,18 +1,17 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { Nav } from "@/components/nav";
+import { Providers } from "@/app/providers";
 
 export const metadata: Metadata = {
-  title: "GPUbnb",
-  description: "A hackathon marketplace for spare local compute."
+  title: "ComputeBNB Provider",
+  description: "A premium desktop worker app for sharing idle compute."
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="en" className="dark">
       <body>
-        <Nav />
-        {children}
+        <Providers>{children}</Providers>
       </body>
     </html>
   );

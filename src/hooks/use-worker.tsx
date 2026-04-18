@@ -2,13 +2,13 @@
 
 import * as React from "react";
 import { createInitialWorkerState, reduceWorkerState } from "@/src/lib/worker-runtime";
-import type { WorkerAction, WorkerState } from "@/src/types/worker";
+import type { WorkerAction, WorkerSettings, WorkerState } from "@/src/types/worker";
 
 interface WorkerContextValue {
   state: WorkerState;
   dispatch: React.Dispatch<WorkerAction>;
   signIn: (name?: string) => void;
-  registerMachine: (settings?: WorkerAction & never) => void;
+  registerMachine: (settings?: Partial<WorkerSettings>) => void;
   startWorker: () => void;
   stopWorker: () => void;
   pauseWorker: () => void;
@@ -34,7 +34,7 @@ export function WorkerProvider({ children }: { children: React.ReactNode }) {
       state,
       dispatch,
       signIn: (name = "Satvikh") => dispatch({ type: "SIGN_IN", name }),
-      registerMachine: () => dispatch({ type: "REGISTER_MACHINE", settings: {} }),
+      registerMachine: (settings = {}) => dispatch({ type: "REGISTER_MACHINE", settings }),
       startWorker: () => dispatch({ type: "START_WORKER" }),
       stopWorker: () => dispatch({ type: "STOP_WORKER" }),
       pauseWorker: () => dispatch({ type: "PAUSE_WORKER" }),
