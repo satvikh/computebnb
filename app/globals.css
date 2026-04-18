@@ -24,10 +24,211 @@
 
 body {
   @apply bg-background text-foreground antialiased;
+  font-feature-settings: "ss01", "cv11", "tnum";
+  text-rendering: optimizeLegibility;
 }
 
 input,
 textarea,
 select {
   @apply rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring;
+}
+
+/* Shared utility animations that individual themes can opt into. */
+
+@keyframes gpubnb-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+.gpubnb-blink { animation: gpubnb-blink 1.05s steps(2, end) infinite; }
+
+@keyframes gpubnb-scan {
+  0% { transform: translateY(-10%); }
+  100% { transform: translateY(110%); }
+}
+.gpubnb-scan { animation: gpubnb-scan 7s linear infinite; }
+
+@keyframes gpubnb-pulse-dot {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.35); opacity: 0.55; }
+}
+.gpubnb-pulse-dot { animation: gpubnb-pulse-dot 1.6s ease-in-out infinite; }
+
+@keyframes gpubnb-float {
+  0%, 100% { transform: translate3d(0,0,0); }
+  50% { transform: translate3d(0,-6px,0); }
+}
+.gpubnb-float { animation: gpubnb-float 6s ease-in-out infinite; }
+
+@keyframes gpubnb-shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.gpubnb-shimmer {
+  background: linear-gradient(110deg, transparent 40%, rgba(255,255,255,0.55) 50%, transparent 60%);
+  background-size: 200% 100%;
+  animation: gpubnb-shimmer 3s ease-in-out infinite;
+}
+
+@keyframes gpubnb-ticker {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+.gpubnb-ticker { animation: gpubnb-ticker 40s linear infinite; }
+
+@keyframes gpubnb-dash {
+  to { stroke-dashoffset: -1000; }
+}
+.gpubnb-dash { animation: gpubnb-dash 8s linear infinite; }
+
+@keyframes gpubnb-fade-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.gpubnb-fade-up { animation: gpubnb-fade-up 0.6s ease-out both; }
+
+/* Grain noise overlay (used by several themes as a subtle texture) */
+.gpubnb-grain {
+  position: absolute; inset: 0; pointer-events: none; opacity: 0.08;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.6 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  mix-blend-mode: overlay;
+}
+/* GPUbnb Theme-0 — operational hardware marketplace
+   Warm paper, deep ink, electric-lime live state. */
+
+.gpu-root {
+  --paper: #f4f1ea;
+  --paper-2: #ebe7dd;
+  --paper-3: #dfd9cc;
+  --ink: #141410;
+  --ink-2: #2a2823;
+  --ink-3: #5c584e;
+  --ink-4: #8b8678;
+  --rule: #1c1a16;
+  --rule-soft: rgba(20, 20, 16, 0.12);
+
+  --live: #c9f23b;
+  --live-ink: #1f2e00;
+  --running: #e66a2c;
+  --warming: #f0b23a;
+  --idle: #8b8678;
+  --error: #c4352b;
+
+  --font-ui: var(--font-t0-sans), ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  --font-mono: var(--font-t0-mono), ui-monospace, "SF Mono", Menlo, monospace;
+  --font-display: var(--font-t0-serif), "Times New Roman", serif;
+
+  font-family: var(--font-ui);
+  color: var(--ink);
+  background: var(--paper);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
+}
+
+.gpu-root *,
+.gpu-root *::before,
+.gpu-root *::after {
+  box-sizing: border-box;
+}
+
+.gpu-root .mono {
+  font-family: var(--font-mono);
+  font-feature-settings: "zero", "ss02";
+}
+.gpu-root .serif {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 400;
+}
+
+.gpu-root .kbd {
+  display: inline-block;
+  padding: 1px 6px;
+  border: 1px solid var(--rule-soft);
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--ink-3);
+  background: var(--paper);
+}
+
+.gpu-root .eyebrow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.gpu-root .dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+.gpu-root .dot.live {
+  background: var(--live);
+  box-shadow: 0 0 0 2px rgba(201, 242, 59, 0.25);
+}
+.gpu-root .dot.running {
+  background: var(--running);
+}
+.gpu-root .dot.warming {
+  background: var(--warming);
+}
+.gpu-root .dot.idle {
+  background: var(--idle);
+}
+.gpu-root .dot.error {
+  background: var(--error);
+}
+
+@keyframes t0-pulse-live {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(201, 242, 59, 0.55);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(201, 242, 59, 0.08);
+  }
+}
+.gpu-root .dot.live.animated {
+  animation: t0-pulse-live 1.8s ease-in-out infinite;
+}
+
+.gpu-root .mgrid {
+  display: grid;
+  grid-template-columns: repeat(24, 1fr);
+  gap: 3px;
+}
+.gpu-root .mgrid .cell {
+  aspect-ratio: 1;
+  background: var(--paper-3);
+  border-radius: 1px;
+}
+.gpu-root .mgrid .cell.on {
+  background: var(--live);
+}
+.gpu-root .mgrid .cell.run {
+  background: var(--running);
+}
+.gpu-root .mgrid .cell.warm {
+  background: var(--warming);
+}
+.gpu-root .mgrid .cell.off {
+  background: var(--paper-3);
+}
+
+/* dark surface inverts the machine grid "off" state so it doesn't wash out */
+.gpu-root .mgrid.inv .cell.off {
+  background: rgba(244, 241, 234, 0.08);
+}
+
+/* anchor reset for the prototype's clickable links */
+.gpu-root a {
+  color: inherit;
+  text-decoration: inherit;
+  cursor: pointer;
 }
