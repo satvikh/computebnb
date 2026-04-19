@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
+import { formatUsdFromCents } from "@/lib/payment-config";
 
 type Job = {
   id: string;
@@ -13,6 +14,15 @@ type Job = {
   stdout: string;
   stderr: string;
   exitCode: number | null;
+  budgetCents: number;
+  jobCostCents: number | null;
+  providerPayoutCents: number | null;
+  platformFeeCents: number | null;
+  solanaPaymentLamports: number | null;
+  solanaPaymentSignature: string | null;
+  solanaPaymentStatus: "pending" | "settled" | "failed";
+  solanaCentsPerSol: number | null;
+  actualRuntimeSeconds: number | null;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
@@ -91,6 +101,13 @@ export default function JobDetailPage() {
               <Metric label="Started" value={job.startedAt ? new Date(job.startedAt).toLocaleTimeString() : "not started"} />
             </div>
 
+            <div className="mb-6 grid gap-4 md:grid-cols-4">
+              <Metric label="Budget ceiling" value={formatUsdFromCents(job.budgetCents)} />
+              <Metric label="Charged" value={job.jobCostCents === null ? "pending" : formatUsdFromCents(job.jobCostCents)} />
+              <Metric label="Provider payout" value={job.providerPayoutCents === null ? "pending" : formatUsdFromCents(job.providerPayoutCents)} />
+              <Metric label="Payment" value={job.solanaPaymentStatus} />
+            </div>
+
             <div className="grid gap-6 lg:grid-cols-2">
               <Panel title="Python code" body={job.code} />
               <Panel title="stdout" body={job.stdout || "Waiting for output."} />
@@ -101,6 +118,17 @@ export default function JobDetailPage() {
                   `Created: ${new Date(job.createdAt).toLocaleString()}`,
                   `Started: ${job.startedAt ? new Date(job.startedAt).toLocaleString() : "—"}`,
                   `Completed: ${job.completedAt ? new Date(job.completedAt).toLocaleString() : "—"}`,
+                ].join("\n")}
+              />
+              <Panel
+                title="Payment settlement"
+                body={[
+                  `Status: ${job.solanaPaymentStatus}`,
+                  `Signature: ${job.solanaPaymentSignature ?? "pending"}`,
+                  `Lamports: ${job.solanaPaymentLamports ?? 0}`,
+                  `FX rate: ${job.solanaCentsPerSol ?? "—"} cents/SOL`,
+                  `Runtime: ${job.actualRuntimeSeconds ?? "—"} seconds`,
+                  `Platform fee: ${job.platformFeeCents === null ? "pending" : formatUsdFromCents(job.platformFeeCents)}`,
                 ].join("\n")}
               />
             </div>

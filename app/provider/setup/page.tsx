@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useWorker } from "@/src/hooks/use-worker";
+import { DEFAULT_MACHINE_HOURLY_RATE_CENTS, formatUsdFromCents } from "@/lib/payment-config";
 
 export default function ProviderSetupPage() {
   const router = useRouter();
@@ -12,6 +13,10 @@ export default function ProviderSetupPage() {
       <div className="mx-auto max-w-4xl rounded-xl border border-white/10 bg-white/5 p-8">
         <p className="text-sm uppercase tracking-[0.2em] text-zinc-400">Producer machine setup</p>
         <h1 className="mt-4 text-4xl font-semibold">Configure this machine for Python jobs</h1>
+        <div className="mt-4 rounded-xl border border-lime-300/20 bg-lime-300/10 px-4 py-3 text-sm text-lime-100">
+          Suggested payout rate: <span className="font-semibold text-lime-300">{formatUsdFromCents(DEFAULT_MACHINE_HOURLY_RATE_CENTS)}/hour</span>.
+          This MVP uses a simulated off-chain payout ledger and keeps the rate fixed for now.
+        </div>
         <div className="mt-8 grid gap-4">
           <input
             className="h-12 rounded-md border border-white/10 bg-black/30 px-4 text-white"

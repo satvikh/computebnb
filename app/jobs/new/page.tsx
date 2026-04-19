@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { formatUsdFromCents } from "@/lib/payment-config";
 
 type SessionUser = {
   id: string;
@@ -19,6 +20,7 @@ type Machine = {
   gpu: string;
   ramGb: number;
   status: "active" | "inactive" | "busy";
+  hourlyRateCents: number;
 };
 
 function NewJobPageContent() {
@@ -148,7 +150,7 @@ function NewJobPageContent() {
                   </option>
                   {machines.map((machine) => (
                     <option key={machine.id} value={machine.id}>
-                      {machine.name} | {machine.gpu} | {machine.ramGb} GB | {machine.status}
+                      {machine.name} | {machine.gpu} | {machine.ramGb} GB | {formatUsdFromCents(machine.hourlyRateCents)}/hr | {machine.status}
                     </option>
                   ))}
                 </select>
@@ -220,6 +222,7 @@ function NewJobPageContent() {
                   <p>CPU: {selectedMachine.cpu}</p>
                   <p>GPU: {selectedMachine.gpu}</p>
                   <p>RAM: {selectedMachine.ramGb} GB</p>
+                  <p>Price: {formatUsdFromCents(selectedMachine.hourlyRateCents)}/hour</p>
                   <p>Status: {selectedMachine.status}</p>
                 </div>
               </>

@@ -4,6 +4,7 @@ import dbConnect from "@/lib/db";
 import { Machine, User } from "@/lib/models";
 import { formatMachine } from "@/lib/mvp";
 import { generateSolanaWallet } from "@/lib/solana";
+import { DEFAULT_MACHINE_HOURLY_RATE_CENTS } from "@/lib/payment-config";
 
 const schema = z.object({
   producerUserId: z.string().min(1),
@@ -35,11 +36,11 @@ export async function POST(request: Request) {
           cpu: input.cpu,
           gpu: input.gpu,
           ramGb: input.ramGb,
+          hourlyRateCents: DEFAULT_MACHINE_HOURLY_RATE_CENTS,
         },
         $setOnInsert: {
           status: "inactive",
           producerUserId: producer._id,
-          hourlyRateCents: 300,
           totalEarnedCents: 0,
           walletAddress: wallet?.walletAddress,
           walletSecretKey: wallet?.walletSecretKey,

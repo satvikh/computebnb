@@ -1,4 +1,5 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
+import { DEFAULT_MACHINE_HOURLY_RATE_CENTS } from "@/lib/payment-config";
 
 export type MachineStatus = "active" | "inactive" | "busy";
 
@@ -30,7 +31,7 @@ const MachineSchema = new Schema<IMachine>(
     cpu: { type: String, required: true, trim: true },
     gpu: { type: String, required: true, trim: true },
     ramGb: { type: Number, required: true, min: 1 },
-    hourlyRateCents: { type: Number, default: 300, min: 1 },
+    hourlyRateCents: { type: Number, default: DEFAULT_MACHINE_HOURLY_RATE_CENTS, min: 1 },
     totalEarnedCents: { type: Number, default: 0, min: 0 },
     walletAddress: { type: String, trim: true },
     walletSecretKey: { type: String, trim: true },

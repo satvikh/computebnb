@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { listUserJobs } from "@/lib/mvp";
+import { formatUsdFromCents } from "@/lib/payment-config";
 import { readSessionUser } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
@@ -34,6 +35,11 @@ export default async function JobsPage() {
                   <h2 className="text-xl font-semibold">{job.filename ?? "script.py"}</h2>
                   <p className="mt-2 text-sm text-zinc-400">
                     Machine: {job.machineName ?? job.machineId} | Status: {job.status}
+                  </p>
+                  <p className="mt-2 text-sm text-zinc-400">
+                    {job.jobCostCents !== null
+                      ? `Charged ${formatUsdFromCents(job.jobCostCents)} · payment ${job.solanaPaymentStatus}`
+                      : `Budget ceiling ${formatUsdFromCents(job.budgetCents)} · payment ${job.solanaPaymentStatus}`}
                   </p>
                 </div>
                 <span className="rounded-full border border-white/10 px-3 py-1 text-xs uppercase tracking-[0.2em] text-zinc-300">

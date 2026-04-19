@@ -2,6 +2,7 @@ import { Types } from "mongoose";
 import dbConnect from "@/lib/db";
 import { Job, Machine, User } from "@/lib/models";
 import type { SessionUser } from "@/lib/session";
+import { DEFAULT_MACHINE_HOURLY_RATE_CENTS } from "@/lib/payment-config";
 
 export type ApiUser = SessionUser;
 const MARKETPLACE_MACHINE_STALE_MS = 15_000;
@@ -72,7 +73,7 @@ export function formatMachine(machine: {
     gpu: machine.gpu,
     ramGb: machine.ramGb,
     status: machine.status,
-    hourlyRateCents: machine.hourlyRateCents ?? 300,
+    hourlyRateCents: machine.hourlyRateCents ?? DEFAULT_MACHINE_HOURLY_RATE_CENTS,
     totalEarnedCents: machine.totalEarnedCents ?? 0,
     walletAddress: machine.walletAddress ?? null,
     walletNetwork: machine.walletNetwork ?? null,

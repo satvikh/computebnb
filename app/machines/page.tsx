@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { listMarketplaceMachines } from "@/lib/mvp";
+import { formatUsdFromCents } from "@/lib/payment-config";
 import { readSessionUser } from "@/lib/session";
 
 export const dynamic = "force-dynamic";
@@ -37,6 +38,9 @@ export default async function MachinesPage() {
                   <h2 className="text-2xl font-semibold">{machine.name}</h2>
                   <p className="mt-2 text-sm text-zinc-400">
                     CPU: {machine.cpu} | GPU: {machine.gpu} | RAM: {machine.ramGb} GB
+                  </p>
+                  <p className="mt-2 text-sm text-lime-300">
+                    {formatUsdFromCents(machine.hourlyRateCents)}/hour
                   </p>
                 </div>
                 <span className="rounded-full border border-white/10 px-3 py-1 text-xs uppercase tracking-[0.2em] text-zinc-300">
