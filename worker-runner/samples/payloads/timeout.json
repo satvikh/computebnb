@@ -1,0 +1,10 @@
+{
+  "type": "python_script",
+  "script": "import time\\nprint('starting slow job')\\ntime.sleep(30)\\nprint('this should not print')\\n",
+  "limits": {
+    "timeoutMs": 3000,
+    "cpus": 1,
+    "memoryMb": 256,
+    "pidsLimit": 64
+  }
+}

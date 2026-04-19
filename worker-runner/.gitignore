@@ -1,0 +1,6 @@
+node_modules/
+dist/
+artifacts/*
+workspaces/*
+!artifacts/.gitkeep
+!workspaces/.gitkeep

@@ -1,0 +1,12 @@
+{
+  "type": "benchmark_demo",
+  "input": {
+    "iterations": 150000
+  },
+  "limits": {
+    "timeoutMs": 15000,
+    "cpus": 1,
+    "memoryMb": 256,
+    "pidsLimit": 64
+  }
+}
