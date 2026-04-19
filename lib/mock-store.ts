@@ -44,7 +44,9 @@ export const store = {
   },
 
   listJobs() {
-    return Array.from(jobs.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    return Array.from(jobs.values()).sort(
+      (a, b) => String(b.createdAt).localeCompare(String(a.createdAt))
+    );
   },
 
   listEvents(jobId: string) {
@@ -54,15 +56,21 @@ export const store = {
   registerProvider(input: { name: string; capabilities?: string[]; hourlyRateCents?: number }) {
     const provider: Provider = {
       id: id("prv"),
+      machineId: "",
       token: id("tok"),
       name: input.name,
+      machineName: input.name,
       capabilities: input.capabilities ?? ["cpu", "node"],
       hourlyRateCents: input.hourlyRateCents ?? 250,
       totalEarnedCents: 0,
+      completedJobs: 0,
+      failedJobs: 0,
+      successRate: 100,
       status: "online",
       lastHeartbeatAt: now(),
       createdAt: now()
     };
+    provider.machineId = provider.id;
 
     providers.set(provider.id, provider);
     return provider;
@@ -84,11 +92,21 @@ export const store = {
       title: input.title,
       type: input.type,
       status: "queued",
+      machineId: "",
+      source: input.input,
       input: input.input,
       budgetCents: input.budgetCents ?? 500,
       createdAt,
       updatedAt: createdAt
     };
+
+    const firstProvider = Array.from(providers.values())[0];
+    if (firstProvider) {
+      job.machineId = firstProvider.id;
+      job.assignedProviderId = firstProvider.id;
+      job.assignedProviderName = firstProvider.name;
+      job.machineName = firstProvider.name;
+    }
 
     jobs.set(job.id, job);
     addEvent(job.id, "created", "Job queued from web app");
@@ -195,7 +213,7 @@ if (!state.seeded) {
 
   store.createJob({
     title: "Summarize launch notes",
-    type: "text_generation",
+    type: "python",
     input: "Summarize these hackathon launch notes into three bullets.",
     budgetCents: 700
   });

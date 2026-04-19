@@ -10,9 +10,9 @@ export function RecentJobsTable({ jobs }: { jobs: Job[] }) {
       <div className="flex items-center justify-between">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.24em] text-zinc-500">History</p>
-          <h2 className="mt-2 text-xl font-semibold text-white">Recent jobs</h2>
+          <h2 className="mt-2 text-xl font-semibold text-white">Latest completed jobs</h2>
         </div>
-        <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-zinc-400">{jobs.length} synced</span>
+        <span className="rounded-md border border-white/10 px-2 py-1 text-xs text-zinc-400">{jobs.length} on this machine</span>
       </div>
       <div className="mt-4 overflow-hidden rounded-lg border border-white/10">
         {jobs.slice(0, 5).map((job) => (

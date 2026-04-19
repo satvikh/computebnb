@@ -1,9 +1,9 @@
 import type { Types } from "mongoose";
-import { LedgerEntry, Provider } from "@/lib/models";
+import { LedgerEntry, Machine } from "@/lib/models";
 
 export async function recordCompletedJobLedger(input: {
   jobId: Types.ObjectId | string;
-  providerId: Types.ObjectId | string;
+  machineId: Types.ObjectId | string;
   budgetCents: number;
   providerPayoutCents: number;
   platformFeeCents: number;
@@ -25,7 +25,7 @@ export async function recordCompletedJobLedger(input: {
     {
       $setOnInsert: {
         jobId: input.jobId,
-        providerId: input.providerId,
+        machineId: input.machineId,
         amountCents: input.providerPayoutCents,
         status: "pending"
       }
@@ -38,7 +38,7 @@ export async function recordCompletedJobLedger(input: {
     {
       $setOnInsert: {
         jobId: input.jobId,
-        providerId: input.providerId,
+        machineId: input.machineId,
         amountCents: input.platformFeeCents,
         status: "captured"
       }
@@ -47,7 +47,7 @@ export async function recordCompletedJobLedger(input: {
   );
 
   if (payout.upsertedCount > 0) {
-    await Provider.findByIdAndUpdate(input.providerId, {
+    await Machine.findByIdAndUpdate(input.machineId, {
       $inc: { totalEarnedCents: input.providerPayoutCents }
     });
   }

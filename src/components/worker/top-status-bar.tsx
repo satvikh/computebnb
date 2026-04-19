@@ -28,7 +28,7 @@ export function TopStatusBar({ state }: { state: WorkerState }) {
         </span>
         <span className="inline-flex items-center gap-1.5">
           <Activity className="h-3.5 w-3.5 text-cyan-200" />
-          {state.activeJob ? "Job streaming" : "Scheduler ready"}
+          {state.availability === "active" ? (state.activeJob ? "One job running" : "Active and waiting") : "Inactive"}
         </span>
       </div>
     </div>

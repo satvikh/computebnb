@@ -17,7 +17,7 @@ export function MachineOverviewCard({
   onStop: () => void;
   onPause: () => void;
 }) {
-  const running = state.machine.status !== "offline";
+  const active = state.availability === "active";
 
   return (
     <section className="relative overflow-hidden rounded-lg border border-white/10 bg-white/[0.055] p-5 shadow-[0_24px_80px_rgba(0,0,0,0.32)]">
@@ -42,24 +42,24 @@ export function MachineOverviewCard({
         </div>
 
         <div className="w-full rounded-lg border border-white/10 bg-black/25 p-4 md:w-72">
-          <p className="text-sm font-medium text-zinc-300">Worker control</p>
+          <p className="text-sm font-medium text-zinc-300">Availability</p>
           <p className="mt-1 text-sm leading-6 text-zinc-500">
-            {running ? "Your node is accepting trusted jobs inside your resource limits." : "Start the worker to receive a demo job from the scheduler."}
+            {active ? "This provider is active. The machine can process one trusted job at a time within your local limits." : "This provider is inactive. Turn it on when you want this machine to accept a single job."}
           </p>
           <div className="mt-4 flex gap-2">
-            {running ? (
+            {active ? (
               <>
                 <Button variant="outline" className="h-11 flex-1 border-white/15 bg-white/[0.03] text-white hover:bg-white/10" onClick={onPause}>
-                  Pause
+                  {state.machine.status === "paused" ? "Paused" : "Pause"}
                 </Button>
                 <Button className="h-11 flex-1 bg-rose-300 text-zinc-950 hover:bg-rose-200" onClick={onStop}>
-                  Stop
+                  Set inactive
                 </Button>
               </>
             ) : (
               <Button className="h-11 w-full bg-emerald-300 text-zinc-950 hover:bg-emerald-200" onClick={onStart}>
                 <Power className="mr-2 h-4 w-4" />
-                Start Worker
+                Set active
               </Button>
             )}
           </div>

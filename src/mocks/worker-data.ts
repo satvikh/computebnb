@@ -1,4 +1,4 @@
-import type { Earnings, Job, JobLog, Machine, ResourceMetrics, WorkerSettings, WorkerState } from "@/src/types/worker";
+import type { Earnings, Job, JobLog, LatestOutputStatus, Machine, ResourceMetrics, WorkerSettings, WorkerState } from "@/src/types/worker";
 
 export const detectedMachine: Machine = {
   id: "node-mac-81f4",
@@ -66,7 +66,8 @@ export const recentJobs: Job[] = [
     earnings: 8.72,
     cpuUsage: 61,
     memoryUsage: 44,
-    logs: []
+    logs: [],
+    executionOutput: "Output bundle uploaded. Verification hash accepted by coordinator."
   },
   {
     id: "job-9721",
@@ -79,7 +80,8 @@ export const recentJobs: Job[] = [
     earnings: 6.25,
     cpuUsage: 55,
     memoryUsage: 39,
-    logs: []
+    logs: [],
+    executionOutput: "Rendered frames archived and delivered to requester."
   },
   {
     id: "job-9655",
@@ -92,17 +94,29 @@ export const recentJobs: Job[] = [
     earnings: 4.18,
     cpuUsage: 46,
     memoryUsage: 31,
-    logs: []
+    logs: [],
+    executionOutput: "Artifact packaged successfully. No warnings emitted."
   }
 ];
+
+export const initialLatestOutput: LatestOutputStatus = {
+  jobId: recentJobs[0]?.id ?? null,
+  jobName: recentJobs[0]?.name ?? "No completed jobs yet",
+  state: "ready",
+  summary: "Last output verified",
+  detail: recentJobs[0]?.executionOutput ?? "Register this machine to receive a first workload.",
+  updatedAt: recentJobs[0]?.estimatedCompletionAt ?? recentJobs[0]?.startedAt ?? null
+};
 
 export const initialWorkerState: WorkerState = {
   signedIn: false,
   registered: false,
   userName: "Satvikh",
+  availability: "inactive",
   machine: detectedMachine,
   metrics: initialMetrics,
   activeJob: null,
+  latestOutput: initialLatestOutput,
   recentJobs,
   earnings: {
     lifetime: 284.46,

@@ -12,7 +12,7 @@ export default function AuthPage() {
 
   function handleSignIn() {
     signIn("Satvikh");
-    router.push("/setup");
+    router.push("/provider/setup");
   }
 
   return (

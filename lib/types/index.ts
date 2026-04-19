@@ -1,34 +1,57 @@
-export type JobStatus = "queued" | "assigned" | "running" | "completed" | "failed";
+export type JobStatus = string;
 
-export type JobType = "text_generation" | "image_caption" | "embedding" | "shell_demo";
+export type JobType = "python";
 
-export type ProviderStatus = "online" | "offline" | "busy";
+export type MachineStatus = string;
+export type ProviderStatus = MachineStatus;
 
-export interface Provider {
+export interface Machine {
   id: string;
+  machineId?: string;
   name: string;
-  status: ProviderStatus;
+  machineName?: string;
+  status: MachineStatus;
   capabilities: string[];
   hourlyRateCents: number;
   totalEarnedCents: number;
+  completedJobs?: number;
+  failedJobs?: number;
+  successRate?: number;
   lastHeartbeatAt?: string;
   token?: string;
   createdAt: string;
 }
 
+export type Provider = Machine;
+
 export interface Job {
   id: string;
   title: string;
-  type: JobType;
+  type: string;
   status: JobStatus;
-  input: string;
+  machineId: string;
+  machineName?: string | null;
+  assignedProviderId?: string | null;
+  assignedProviderName?: string | null;
   requiredCapabilities?: string[];
-  runnerPayload?: Record<string, unknown>;
-  result?: string;
-  error?: string;
+  runnerPayload?: Record<string, unknown> | null;
+  source: string;
+  input: string;
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number | null;
+  result?: string | null;
+  error?: string | null;
+  failureReason?: string | null;
   budgetCents: number;
-  providerPayoutCents?: number;
-  platformFeeCents?: number;
+  jobCostCents?: number | null;
+  providerPayoutCents?: number | null;
+  platformFeeCents?: number | null;
+  proofHash?: string | null;
+  retryCount?: number;
+  startedAt?: string;
+  completedAt?: string;
+  actualRuntimeSeconds?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -37,7 +60,7 @@ export interface Assignment {
   id: string;
   jobId: string;
   providerId: string;
-  status: JobStatus;
+  status: string;
   startedAt?: string;
   completedAt?: string;
   createdAt: string;
@@ -46,8 +69,11 @@ export interface Assignment {
 export interface JobEvent {
   id: string;
   jobId: string;
+  machineId?: string;
   providerId?: string;
-  type: "created" | "assigned" | "started" | "progress" | "completed" | "failed";
+  machineName?: string;
+  providerName?: string;
+  type: string;
   message: string;
   createdAt: string;
 }

@@ -1,8 +1,15 @@
 # MongoDB Atlas Collections
 
-GPUbnb uses MongoDB Atlas as the MVP persistence layer. The app can boot locally with `lib/mock-store.ts`; these collection shapes document the Atlas-backed implementation target.
+GPUbnb's simplified MVP backend persists four core collections:
 
-## `providers`
+- `machines`: inventory plus mocked worker auth metadata
+- `jobs`: machine-pinned Python jobs and their execution outputs
+- `jobevents`: append-only lifecycle trail
+- `ledgerentries`: captured job charge, machine payout, and platform fee rows
+
+The legacy `/api/providers/*` routes still exist as a compatibility layer for mocked auth, but they now read and write the `machines` collection.
+
+## `machines`
 
 ```ts
 {
@@ -12,9 +19,14 @@ GPUbnb uses MongoDB Atlas as the MVP persistence layer. The app can boot locally
   capabilities: string[],
   hourlyRateCents: number,
   totalEarnedCents: number,
+  completedJobs: number,
+  failedJobs: number,
+  successRate: number,
   tokenHash?: string,
   lastHeartbeatAt?: Date,
-  createdAt: Date
+  trustScore: number,
+  createdAt: Date,
+  updatedAt: Date
 }
 ```
 
@@ -24,49 +36,60 @@ GPUbnb uses MongoDB Atlas as the MVP persistence layer. The app can boot locally
 {
   _id: ObjectId,
   title: string,
-  type: "text_generation" | "image_caption" | "embedding" | "shell_demo",
-  status: "queued" | "assigned" | "running" | "completed" | "failed",
-  input: string,
-  result?: string,
-  error?: string,
+  type: "python" | string,
+  status: "queued" | "running" | "completed" | "failed",
+  machineId: ObjectId,
+  source: string,
+  stdout: string,
+  stderr: string,
+  exitCode?: number | null,
   budgetCents: number,
+  jobCostCents?: number,
   providerPayoutCents?: number,
   platformFeeCents?: number,
+  startedAt?: Date,
+  completedAt?: Date,
+  actualRuntimeSeconds?: number,
+  proofHash?: string,
+  failureReason?: string,
+  error?: string,
   createdAt: Date,
   updatedAt: Date
 }
 ```
 
-## `assignments`
+## `jobevents`
 
 ```ts
 {
   _id: ObjectId,
   jobId: ObjectId,
-  providerId: ObjectId,
-  status: "assigned" | "running" | "completed" | "failed",
-  startedAt?: Date,
-  completedAt?: Date,
-  createdAt: Date
+  machineId?: ObjectId,
+  type: string,
+  message: string,
+  createdAt: Date,
+  updatedAt: Date
 }
 ```
 
-## `job_events`
+## `ledgerentries`
 
 ```ts
 {
   _id: ObjectId,
   jobId: ObjectId,
-  providerId?: ObjectId,
-  type: "created" | "assigned" | "started" | "progress" | "completed" | "failed",
-  message: string,
-  createdAt: Date
+  machineId?: ObjectId,
+  type: "job_charge" | "provider_payout" | "machine_payout" | "platform_fee" | "refund",
+  amountCents: number,
+  status: "pending" | "captured" | "settled" | "voided",
+  createdAt: Date,
+  updatedAt: Date
 }
 ```
 
 ## Notes
 
-- Store internal IDs as `ObjectId` in Atlas and convert to strings at API boundaries.
-- Use a unique index on `assignments.jobId` so one job cannot be assigned twice.
-- Use atomic `findOneAndUpdate` calls for scheduling to avoid assigning the same queued job to multiple providers.
-- TODO: Add TTL or offline detection logic for providers whose heartbeats go stale.
+- Consumers are expected to choose a `machineId` when creating a job.
+- Producers poll for work already assigned to their machine; there is no backend scheduler in this MVP.
+- Lifecycle APIs mutate the job document directly rather than writing an `assignments` collection.
+- Store internal IDs as `ObjectId` in Atlas and convert them to strings at API boundaries.

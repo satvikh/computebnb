@@ -5,17 +5,17 @@ ComputeBNB/GPUbnb is a hackathon marketplace for routing lightweight AI and batc
 The project now has one clear web story:
 
 - the stylized marketplace web app is the main product surface
-- the Mongo-backed backend is the source of truth for jobs, providers, assignments, payouts, and event history
+- the Mongo-backed backend is the source of truth for machines, jobs, payouts, and event history
 - the desktop/Tauri provider runtime and Docker sandbox runner are wired in as provider-side execution surfaces
 
 This repo intentionally does **not** try to claim production-grade sandboxing, decentralized verification, or a global GPU cloud. It focuses on a truthful, legible marketplace loop:
 
 ```text
 submit text job
-  -> backend creates queued job
-  -> scheduler assigns a recent online provider
-  -> provider worker starts and reports progress
-  -> backend records runtime, proof hash, payout, fee, and events
+  -> consumer chooses a machine
+  -> backend creates queued job pinned to that machine
+  -> machine polls its own queue, starts, and reports progress
+  -> backend records stdout, stderr, exit code, payout, fee, and events
   -> stylized web dashboard reflects the result
 ```
 
@@ -33,22 +33,21 @@ submit text job
 
 ### Backend
 
-- Mongo/Mongoose models for providers, jobs, assignments, and job events
-- Provider registration and heartbeat APIs
+- Mongo/Mongoose models for machines, jobs, job events, and ledger entries
+- Machine inventory plus provider-compatible registration and heartbeat APIs
 - Job creation and lookup APIs
-- Worker poll/start/progress/complete/fail APIs
-- Simple scheduler with basic stale-assignment cleanup
+- Machine poll/start/progress/complete/fail APIs
 - Runtime-based pricing with budget cap
-- 80/20 provider payout / platform fee split
+- 80/20 machine payout / platform fee split
 - Basic trust signals:
-  - provider completed jobs
-  - provider failed jobs
-  - provider success rate
+  - machine completed jobs
+  - machine failed jobs
+  - machine success rate
   - last heartbeat
+  - raw stdout / stderr / exit code
   - job runtime
-  - proof hash
   - event timeline
-- Provider bearer tokens for worker heartbeat, poll, start, progress, complete, and fail routes
+- Mocked bearer tokens preserved for worker heartbeat, poll, start, progress, complete, and fail routes
 
 ### Provider Runtime
 
@@ -62,7 +61,7 @@ submit text job
 This pass is intentionally limited to:
 
 - text-first inputs and outputs, plus approved Docker demo workloads
-- basic scheduling and retries
+- consumer-selected machines with no backend scheduler
 - backend truth for marketplace pages
 - lightweight provider token auth for worker routes
 
@@ -80,8 +79,8 @@ Out of scope for now:
 - `app/`: Next.js App Router pages and API routes
 - `app/_components/`: stylized marketplace UI primitives and shell components
 - `lib/models/`: Mongo/Mongoose schemas
-- `lib/marketplace.ts`: shared formatting and dashboard/provider/job query helpers
-- `lib/scheduling.ts`: assignment and stale-job logic
+- `lib/marketplace.ts`: shared formatting and dashboard/machine/job query helpers
+- `lib/scheduling.ts`: compatibility helpers for machine polling and stale-heartbeat cleanup
 - `src/`: provider desktop UI components, hooks, reducers, and Tauri clients
 - `src-tauri/`: Tauri v2 provider desktop shell and worker manager
 - `worker/`: lightweight CLI worker used for the current execution loop
@@ -143,17 +142,17 @@ The runner listens on `http://localhost:4317`. See `worker-runner/README.md` for
 ## Demo Flow
 
 1. Start the web app.
-2. Register or heartbeat at least one provider through the Tauri or worker flow.
+2. Register or heartbeat at least one machine through the Tauri or worker flow.
 3. Open `/dashboard` to show live marketplace summary.
-4. Submit a text job from `/jobs/new`.
-5. Let the worker pick it up and complete it.
+4. Submit a Python job pinned to a machine.
+5. Let that machine pick it up and complete it.
 6. Open `/jobs/[id]/results` to show:
-   - assigned provider
+   - selected machine
+   - raw stdout / stderr / exit code
    - runtime
    - final job cost
-   - provider payout
+   - machine payout
    - platform fee
-   - proof hash
    - event trail
 
 ## Quality Checks

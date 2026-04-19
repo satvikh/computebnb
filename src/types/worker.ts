@@ -6,6 +6,8 @@ export type JobType = "render" | "simulation" | "batch-inference" | "compile" | 
 
 export type LogLevel = "info" | "success" | "warning" | "error";
 
+export type ProviderAvailability = "inactive" | "active";
+
 export interface Machine {
   id: string;
   name: string;
@@ -54,6 +56,15 @@ export interface Job {
   executionError?: string | null;
 }
 
+export interface LatestOutputStatus {
+  jobId: string | null;
+  jobName: string;
+  state: "idle" | "running" | "ready" | "failed";
+  summary: string;
+  detail: string;
+  updatedAt: string | null;
+}
+
 export interface Earnings {
   lifetime: number;
   pending: number;
@@ -79,9 +90,11 @@ export interface WorkerState {
   signedIn: boolean;
   registered: boolean;
   userName: string;
+  availability: ProviderAvailability;
   machine: Machine;
   metrics: ResourceMetrics;
   activeJob: Job | null;
+  latestOutput: LatestOutputStatus;
   recentJobs: Job[];
   earnings: Earnings;
   settings: WorkerSettings;
@@ -91,9 +104,11 @@ export interface WorkerState {
 
 export interface WorkerRuntimeSnapshot {
   registered: boolean;
+  availability: ProviderAvailability;
   machine: Machine;
   metrics: ResourceMetrics;
   activeJob: Job | null;
+  latestOutput: LatestOutputStatus;
   recentJobs: Job[];
   earnings: Earnings;
   settings: WorkerSettings;

@@ -1,22 +1,42 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import dbConnect from "@/lib/db";
-import { Job, JobEvent } from "@/lib/models";
+import { Job, JobEvent, Machine } from "@/lib/models";
 import { formatJob, getDbUnavailablePayload, listJobsSummary } from "@/lib/marketplace";
-import { assignNextJob } from "@/lib/scheduling";
 
 const schema = z.object({
   title: z.string().min(1),
-  type: z.enum(["text_generation", "image_caption", "embedding", "shell_demo"]),
-  input: z.string().min(1),
-  requiredCapabilities: z.array(z.string()).optional(),
-  runnerPayload: z.record(z.unknown()).optional(),
+  type: z.string().optional(),
+  machineId: z.string().min(1).optional(),
+  providerId: z.string().min(1).optional(),
+  source: z.string().min(1).optional(),
+  input: z.string().min(1).optional(),
   budgetCents: z.coerce.number().int().positive().optional(),
 });
 
-export async function GET() {
+async function resolveMachineId(candidate?: string | null) {
+  if (candidate) {
+    return candidate;
+  }
+
+  const machines = await Machine.find({ status: { $in: ["online", "busy"] } })
+    .sort({ lastHeartbeatAt: -1, createdAt: 1 })
+    .limit(2)
+    .lean();
+
+  if (machines.length === 1) {
+    return String(machines[0]._id);
+  }
+
+  return null;
+}
+
+export async function GET(request: Request) {
   try {
-    const jobs = await listJobsSummary();
+    const { searchParams } = new URL(request.url);
+    const jobs = await listJobsSummary({
+      machineId: searchParams.get("machineId"),
+    });
     return NextResponse.json({ jobs });
   } catch (error) {
     if (error instanceof Error && error.message.includes("MONGODB_URI")) {
@@ -36,40 +56,55 @@ export async function POST(request: Request) {
       : Object.fromEntries((await request.formData()).entries());
 
     const input = schema.parse(raw);
+    const machineId = await resolveMachineId(input.machineId ?? input.providerId ?? null);
+    const source = input.source ?? input.input;
+
+    if (!machineId) {
+      return NextResponse.json(
+        { error: "machineId is required unless exactly one machine is available" },
+        { status: 400 }
+      );
+    }
+
+    if (!source) {
+      return NextResponse.json({ error: "source is required" }, { status: 400 });
+    }
+
+    const machine = await Machine.findById(machineId);
+    if (!machine) {
+      return NextResponse.json({ error: "Machine not found" }, { status: 404 });
+    }
 
     const job = await Job.create({
       title: input.title,
-      type: input.type,
-      input: input.input,
-      requiredCapabilities: input.requiredCapabilities ?? capabilitiesForType(input.type),
-      runnerPayload: input.runnerPayload,
+      type: input.type ?? "python",
+      machineId: machine._id,
+      source,
       budgetCents: input.budgetCents ?? 500,
-      status: "queued"
+      status: "queued",
+      stdout: "",
+      stderr: "",
     });
 
     await JobEvent.create({
       jobId: job._id,
-      type: "created",
-      message: "Job queued from web app"
+      machineId: machine._id,
+      type: "queued",
+      message: `Job queued for ${machine.name}`,
     });
 
-    await assignNextJob();
-
     if (contentType.includes("application/json")) {
-      return NextResponse.json({ job: formatJob(job) }, { status: 201 });
+      return NextResponse.json({ job: formatJob(job, machine.name) }, { status: 201 });
     }
 
     return NextResponse.redirect(new URL(`/jobs/${job._id}/results`, request.url), { status: 303 });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return NextResponse.json({ error: "Invalid job payload", issues: error.issues }, { status: 400 });
+    }
     if (error instanceof Error && error.message.includes("MONGODB_URI")) {
       return NextResponse.json(getDbUnavailablePayload(), { status: 503 });
     }
     throw error;
   }
-}
-
-function capabilitiesForType(type: z.infer<typeof schema>["type"]) {
-  if (type === "shell_demo") return ["cpu", "docker"];
-  if (type === "embedding" || type === "text_generation") return ["cpu", "node"];
-  return ["cpu"];
 }

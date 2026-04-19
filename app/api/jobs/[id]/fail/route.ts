@@ -1,14 +1,17 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import dbConnect from "@/lib/db";
-import { calculateSuccessRate, formatJob, getDbUnavailablePayload, MAX_JOB_RETRIES } from "@/lib/marketplace";
-import { Job, Assignment, Provider, JobEvent } from "@/lib/models";
-import { assignNextJob } from "@/lib/scheduling";
+import { calculateSuccessRate, formatJob, getDbUnavailablePayload } from "@/lib/marketplace";
+import { Job, Machine, JobEvent } from "@/lib/models";
 import { requireProvider } from "@/lib/provider-auth";
 
 const schema = z.object({
-  providerId: z.string().min(1),
-  error: z.string().min(1),
+  machineId: z.string().min(1).optional(),
+  providerId: z.string().min(1).optional(),
+  error: z.string().optional(),
+  stderr: z.string().optional(),
+  stdout: z.string().optional(),
+  exitCode: z.coerce.number().int().optional(),
   message: z.string().optional(),
 });
 
@@ -20,80 +23,65 @@ export async function POST(
     await dbConnect();
     const { id } = await params;
     const input = schema.parse(await request.json());
-    const auth = await requireProvider(request, input.providerId);
+    const machineId = input.machineId ?? input.providerId;
+    if (!machineId) {
+      return NextResponse.json({ error: "machineId is required" }, { status: 400 });
+    }
+
+    const auth = await requireProvider(request, machineId);
     if (auth.response) return auth.response;
 
-    const assignment = await Assignment.findOne({
-      jobId: id,
-      providerId: input.providerId,
-      status: { $in: ["assigned", "running"] }
-    });
-    if (!assignment) {
-      return NextResponse.json({ error: "Assigned provider mismatch" }, { status: 403 });
-    }
-
-    const [job, provider] = await Promise.all([
-      Job.findById(id),
-      Provider.findById(input.providerId)
+    const [job, machine] = await Promise.all([
+      Job.findOne({ _id: id, machineId }),
+      Machine.findById(machineId)
     ]);
     if (!job) {
-      return NextResponse.json({ error: "Job not found" }, { status: 404 });
+      return NextResponse.json({ error: "Job not found for machine" }, { status: 404 });
     }
-    if (!provider) {
-      return NextResponse.json({ error: "Provider not found" }, { status: 404 });
+    if (!machine) {
+      return NextResponse.json({ error: "Machine not found" }, { status: 404 });
     }
-
-    assignment.status = "failed";
-    assignment.completedAt = new Date();
-    await assignment.save();
-
-    provider.status = "online";
-    provider.failedJobs += 1;
-    provider.successRate = calculateSuccessRate(provider.completedJobs, provider.failedJobs);
-    await provider.save();
-
-    job.error = input.error;
-    job.failureReason = input.error;
-
-    const shouldRetry = (job.retryCount ?? 0) < MAX_JOB_RETRIES;
-    if (shouldRetry) {
-      job.status = "queued";
-      job.retryCount += 1;
-      job.assignedProviderId = undefined;
-      job.startedAt = undefined;
-      job.completedAt = undefined;
-      job.actualRuntimeSeconds = undefined;
-      await job.save();
-
-      await Assignment.findByIdAndDelete(assignment._id);
-      await JobEvent.create({
-        jobId: id,
-        providerId: input.providerId,
-        type: "failed",
-        message: input.message ?? "Worker failed job"
-      });
-      await JobEvent.create({
-        jobId: id,
-        type: "created",
-        message: `Requeued after failure: ${input.error}`
-      });
-      await assignNextJob();
-    } else {
-      job.status = "failed";
-      job.completedAt = new Date();
-      job.retryCount += 1;
-      await job.save();
-      await JobEvent.create({
-        jobId: id,
-        providerId: input.providerId,
-        type: "failed",
-        message: input.message ?? "Worker failed job"
-      });
-      await assignNextJob();
+    if (job.status === "failed") {
+      return NextResponse.json({ job: formatJob(job, machine.name) });
+    }
+    if (job.status === "completed") {
+      return NextResponse.json({ error: "Cannot fail a completed job" }, { status: 409 });
     }
 
-    return NextResponse.json({ job: formatJob(job, provider.name) });
+    const completedAt = new Date();
+    const failureReason = input.error ?? input.stderr ?? "Machine reported failure";
+
+    job.status = "failed";
+    job.completedAt = completedAt;
+    job.stdout = input.stdout ?? job.stdout ?? "";
+    job.stderr = input.stderr ?? failureReason;
+    job.exitCode = input.exitCode ?? 1;
+    job.failureReason = failureReason;
+    job.error = failureReason;
+    job.actualRuntimeSeconds = Math.max(
+      1,
+      Math.round((completedAt.getTime() - (job.startedAt?.getTime() ?? completedAt.getTime())) / 1000)
+    );
+    await job.save();
+
+    machine.failedJobs += 1;
+    machine.successRate = calculateSuccessRate(machine.completedJobs, machine.failedJobs);
+    machine.lastHeartbeatAt = completedAt;
+    machine.status = "online";
+    await machine.save();
+
+    await JobEvent.create({
+      jobId: id,
+      machineId,
+      type: "failed",
+      message: input.message ?? failureReason,
+    });
+
+    return NextResponse.json({ job: formatJob(job, machine.name) });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return NextResponse.json({ error: "Invalid failure payload", issues: error.issues }, { status: 400 });
+    }
     if (error instanceof Error && error.message.includes("MONGODB_URI")) {
       return NextResponse.json(getDbUnavailablePayload(), { status: 503 });
     }

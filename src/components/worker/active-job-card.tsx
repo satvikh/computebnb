@@ -24,8 +24,8 @@ export function ActiveJobCard({
     <section className="rounded-lg border border-white/10 bg-white/[0.055] p-5 shadow-[0_24px_80px_rgba(0,0,0,0.24)]">
       <div className="flex items-center justify-between gap-4">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-cyan-200">Active workload</p>
-          <h2 className="mt-2 text-xl font-semibold text-white">{job ? job.name : "Waiting for trusted compute job"}</h2>
+          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-cyan-200">Current job</p>
+          <h2 className="mt-2 text-xl font-semibold text-white">{job ? job.name : "Waiting for the next single job"}</h2>
         </div>
         <Button
           variant="outline"
@@ -53,12 +53,13 @@ export function ActiveJobCard({
                 <span className="text-zinc-400">{estimateRemaining(job.progress, job.startedAt)} remaining</span>
               </div>
               <ProgressBar value={job.progress} />
+              <p className="mt-3 text-sm leading-6 text-zinc-400">{job.executionOutput ?? "The producer is generating the latest output locally."}</p>
             </div>
           </motion.div>
         ) : (
           <motion.div key="empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="mt-5 rounded-lg border border-dashed border-white/15 bg-black/20 p-8 text-center">
-            <p className="text-sm font-medium text-zinc-200">The scheduler will assign a job moments after the worker comes online.</p>
-            <p className="mt-2 text-sm text-zinc-500">Auto-accept is enabled, CPU limits are enforced, and every workload is logged here.</p>
+            <p className="text-sm font-medium text-zinc-200">When availability is active, the scheduler assigns one trusted job to this machine at a time.</p>
+            <p className="mt-2 text-sm text-zinc-500">The current job, latest output summary, and machine activity stay visible here.</p>
           </motion.div>
         )}
       </AnimatePresence>

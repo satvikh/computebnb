@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import dbConnect from "@/lib/db";
-import { Job, Assignment, JobEvent } from "@/lib/models";
+import { Job, JobEvent, Machine } from "@/lib/models";
 import { formatJob, getDbUnavailablePayload } from "@/lib/marketplace";
 import { requireProvider } from "@/lib/provider-auth";
 
 const schema = z.object({
-  providerId: z.string().min(1),
+  machineId: z.string().min(1).optional(),
+  providerId: z.string().min(1).optional(),
 });
 
 export async function POST(
@@ -17,41 +18,40 @@ export async function POST(
     await dbConnect();
     const { id } = await params;
     const input = schema.parse(await request.json().catch(() => ({})));
-    const auth = await requireProvider(request, input.providerId);
-    if (auth.response) return auth.response;
-
-    const assignment = await Assignment.findOne({
-      jobId: id,
-      providerId: input.providerId,
-      status: "assigned"
-    });
-    if (!assignment) {
-      return NextResponse.json({ error: "Assigned provider mismatch" }, { status: 403 });
+    const machineId = input.machineId ?? input.providerId;
+    if (!machineId) {
+      return NextResponse.json({ error: "machineId is required" }, { status: 400 });
     }
 
-    const startedAt = new Date();
-    assignment.status = "running";
-    assignment.startedAt = startedAt;
-    await assignment.save();
+    const auth = await requireProvider(request, machineId);
+    if (auth.response) return auth.response;
 
+    const startedAt = new Date();
     const job = await Job.findByIdAndUpdate(
-      id,
+      { _id: id, machineId },
       { $set: { status: "running", startedAt } },
       { new: true }
     );
     if (!job) {
-      return NextResponse.json({ error: "Job not found" }, { status: 404 });
+      return NextResponse.json({ error: "Job not found for machine" }, { status: 404 });
     }
+
+    await Machine.findByIdAndUpdate(machineId, {
+      $set: { status: "busy", lastHeartbeatAt: startedAt },
+    });
 
     await JobEvent.create({
       jobId: id,
-      providerId: input.providerId,
+      machineId,
       type: "started",
-      message: "Worker started execution"
+      message: "Machine started execution",
     });
 
-    return NextResponse.json({ job: formatJob(job) });
+    return NextResponse.json({ job: formatJob(job, auth.provider?.name ?? null) });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return NextResponse.json({ error: "Invalid start payload", issues: error.issues }, { status: 400 });
+    }
     if (error instanceof Error && error.message.includes("MONGODB_URI")) {
       return NextResponse.json(getDbUnavailablePayload(), { status: 503 });
     }

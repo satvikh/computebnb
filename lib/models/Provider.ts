@@ -1,50 +1,5 @@
-import mongoose, { Schema, Document, Model } from "mongoose";
+import Machine from "./Machine";
 
-export interface IProvider extends Document {
-  name: string;
-  status: "online" | "offline" | "busy";
-  capabilities: string[];
-  hourlyRateCents: number;
-  totalEarnedCents: number;
-  completedJobs: number;
-  failedJobs: number;
-  successRate: number;
-  tokenHash?: string;
-  lastHeartbeatAt?: Date;
-  trustScore: number;
-  createdAt: Date;
-  updatedAt: Date;
-}
+export type { IMachine as IProvider } from "./Machine";
 
-const ProviderSchema = new Schema<IProvider>(
-  {
-    name: { type: String, required: true },
-    status: {
-      type: String,
-      enum: ["online", "offline", "busy"],
-      default: "online",
-    },
-    capabilities: { type: [String], default: ["cpu", "node"] },
-    hourlyRateCents: { type: Number, default: 250 },
-    totalEarnedCents: { type: Number, default: 0 },
-    completedJobs: { type: Number, default: 0 },
-    failedJobs: { type: Number, default: 0 },
-    successRate: { type: Number, default: 100 },
-    tokenHash: { type: String },
-    lastHeartbeatAt: { type: Date },
-    trustScore: { type: Number, default: 100 },
-  },
-  { timestamps: true }
-);
-
-// Indexes
-ProviderSchema.index({ status: 1 });
-ProviderSchema.index({ lastHeartbeatAt: 1 });
-
-// Prevent model recompilation in Next.js hot reload
-ProviderSchema.index({ status: 1, lastHeartbeatAt: -1 });
-
-const Provider: Model<IProvider> =
-  mongoose.models.Provider || mongoose.model<IProvider>("Provider", ProviderSchema);
-
-export default Provider;
+export default Machine;

@@ -1,10 +1,8 @@
 import crypto from "crypto";
 import dbConnect, { isDbConfigured } from "@/lib/db";
-import { Job, JobEvent, Provider } from "@/lib/models";
+import { Job, JobEvent, Machine } from "@/lib/models";
 
 export const HEARTBEAT_STALE_MS = 30_000;
-export const RUNNING_STALE_MS = 30_000;
-export const MAX_JOB_RETRIES = 1;
 
 export function calculateSuccessRate(completedJobs: number, failedJobs: number) {
   const total = completedJobs + failedJobs;
@@ -12,11 +10,15 @@ export function calculateSuccessRate(completedJobs: number, failedJobs: number) 
   return Number(((completedJobs / total) * 100).toFixed(1));
 }
 
-export function buildProofHash(result: string) {
-  return crypto.createHash("sha256").update(result).digest("hex").slice(0, 16);
+export function buildProofHash(stdout: string, stderr = "") {
+  return crypto
+    .createHash("sha256")
+    .update(`${stdout}\n---\n${stderr}`)
+    .digest("hex")
+    .slice(0, 16);
 }
 
-export function formatProvider(provider: {
+export function formatProvider(machine: {
   _id: unknown;
   name: string;
   status: string;
@@ -27,65 +29,84 @@ export function formatProvider(provider: {
   failedJobs?: number;
   successRate?: number;
   lastHeartbeatAt?: Date | null;
-  createdAt?: Date;
+  createdAt?: Date | null;
 }) {
+  const id = String(machine._id);
+
   return {
-    id: String(provider._id),
-    name: provider.name,
-    status: provider.status,
-    capabilities: provider.capabilities,
-    hourlyRateCents: provider.hourlyRateCents,
-    totalEarnedCents: provider.totalEarnedCents,
-    completedJobs: provider.completedJobs ?? 0,
-    failedJobs: provider.failedJobs ?? 0,
-    successRate: provider.successRate ?? calculateSuccessRate(provider.completedJobs ?? 0, provider.failedJobs ?? 0),
-    lastHeartbeatAt: provider.lastHeartbeatAt ?? null,
-    createdAt: provider.createdAt ?? null
+    id,
+    machineId: id,
+    name: machine.name,
+    machineName: machine.name,
+    status: machine.status,
+    capabilities: machine.capabilities,
+    hourlyRateCents: machine.hourlyRateCents,
+    totalEarnedCents: machine.totalEarnedCents,
+    completedJobs: machine.completedJobs ?? 0,
+    failedJobs: machine.failedJobs ?? 0,
+    successRate:
+      machine.successRate ??
+      calculateSuccessRate(machine.completedJobs ?? 0, machine.failedJobs ?? 0),
+    lastHeartbeatAt: machine.lastHeartbeatAt ?? null,
+    createdAt: machine.createdAt ?? null,
   };
 }
+
+export const formatMachine = formatProvider;
 
 export function formatJob(
   job: {
     _id: unknown;
     title: string;
-    type: string;
+    type?: string | null;
     status: string;
-    input: string;
-    requiredCapabilities?: string[];
-    runnerPayload?: Record<string, unknown> | null;
-    result?: string | null;
-    error?: string | null;
-    failureReason?: string | null;
+    machineId: unknown;
+    source: string;
+    stdout?: string | null;
+    stderr?: string | null;
+    exitCode?: number | null;
     budgetCents: number;
-    assignedProviderId?: unknown;
-    retryCount?: number;
-    startedAt?: Date | null;
-    completedAt?: Date | null;
-    actualRuntimeSeconds?: number | null;
     jobCostCents?: number | null;
     providerPayoutCents?: number | null;
     platformFeeCents?: number | null;
+    startedAt?: Date | null;
+    completedAt?: Date | null;
+    actualRuntimeSeconds?: number | null;
     proofHash?: string | null;
-    createdAt?: Date;
-    updatedAt?: Date;
+    failureReason?: string | null;
+    error?: string | null;
+    createdAt?: Date | null;
+    updatedAt?: Date | null;
   },
-  assignedProviderName?: string | null
+  machineName?: string | null
 ) {
+  const machineId = String(job.machineId);
+  const stdout = job.stdout ?? "";
+  const stderr = job.stderr ?? "";
+
   return {
     id: String(job._id),
     title: job.title,
-    type: job.type,
+    type: job.type ?? "python",
     status: job.status,
-    input: job.input,
-    requiredCapabilities: job.requiredCapabilities ?? [],
-    runnerPayload: job.runnerPayload ?? null,
-    result: job.result ?? null,
-    error: job.error ?? null,
-    failureReason: job.failureReason ?? null,
+    machineId,
+    machineName: machineName ?? null,
+    assignedProviderId: machineId,
+    assignedProviderName: machineName ?? null,
+    requiredCapabilities: [],
+    runnerPayload: machineName
+      ? { selectedProviderName: machineName }
+      : null,
+    source: job.source,
+    input: job.source,
+    stdout,
+    stderr,
+    exitCode: job.exitCode ?? null,
+    result: stdout || null,
+    error: stderr || job.error || null,
+    failureReason: job.failureReason ?? (stderr || null),
     budgetCents: job.budgetCents,
-    assignedProviderId: job.assignedProviderId ? String(job.assignedProviderId) : null,
-    assignedProviderName: assignedProviderName ?? null,
-    retryCount: job.retryCount ?? 0,
+    retryCount: 0,
     startedAt: job.startedAt ?? null,
     completedAt: job.completedAt ?? null,
     actualRuntimeSeconds: job.actualRuntimeSeconds ?? null,
@@ -94,136 +115,154 @@ export function formatJob(
     platformFeeCents: job.platformFeeCents ?? null,
     proofHash: job.proofHash ?? null,
     createdAt: job.createdAt ?? null,
-    updatedAt: job.updatedAt ?? null
+    updatedAt: job.updatedAt ?? null,
   };
+}
+
+async function getMachineNameLookup(ids: string[]) {
+  const machines = ids.length
+    ? await Machine.find({ _id: { $in: ids } }).lean()
+    : [];
+
+  return new Map(machines.map((machine) => [String(machine._id), machine.name]));
 }
 
 export async function getDashboardSummary() {
   await dbConnect();
 
-  const [providers, jobs, events] = await Promise.all([
-    Provider.find().sort({ totalEarnedCents: -1, createdAt: 1 }).lean(),
+  const [machines, recentJobs, recentActivity, completedTotals] = await Promise.all([
+    Machine.find().sort({ status: 1, totalEarnedCents: -1, createdAt: 1 }).lean(),
     Job.find().sort({ createdAt: -1 }).limit(8).lean(),
-    JobEvent.find().sort({ createdAt: -1 }).limit(12).lean()
+    JobEvent.find().sort({ createdAt: -1 }).limit(12).lean(),
+    Job.aggregate([
+      { $match: { status: "completed" } },
+      {
+        $group: {
+          _id: null,
+          totalProviderPayoutCents: { $sum: { $ifNull: ["$providerPayoutCents", 0] } },
+          totalPlatformFeeCents: { $sum: { $ifNull: ["$platformFeeCents", 0] } },
+        },
+      },
+    ]),
   ]);
 
-  const providerIds = Array.from(
+  const machineIds = Array.from(
     new Set([
-      ...jobs.map((job) => job.assignedProviderId).filter(Boolean).map(String),
-      ...events.map((event) => event.providerId?.toString()).filter(Boolean)
+      ...recentJobs.map((job) => String(job.machineId)),
+      ...recentActivity.map((event) => event.machineId?.toString()).filter(Boolean),
     ])
   ) as string[];
 
-  const providerLookup = new Map(
-    (
-      providerIds.length
-        ? await Provider.find({ _id: { $in: providerIds } }).lean()
-        : []
-    ).map((provider) => [String(provider._id), provider.name])
+  const machineLookup = await getMachineNameLookup(machineIds);
+  const machineSummary = machines.map(formatMachine);
+  const jobSummary = recentJobs.map((job) =>
+    formatJob(job, machineLookup.get(String(job.machineId)) ?? null)
   );
-
-  const providerSummary = providers.map(formatProvider);
-  const jobSummary = jobs.map((job) =>
-    formatJob(job, job.assignedProviderId ? providerLookup.get(String(job.assignedProviderId)) ?? null : null)
-  );
-
-  const totalProviderPayoutCents = jobs.reduce((sum, job) => sum + (job.providerPayoutCents ?? 0), 0);
-  const totalPlatformFeeCents = jobs.reduce((sum, job) => sum + (job.platformFeeCents ?? 0), 0);
+  const totals = completedTotals[0] ?? {
+    totalProviderPayoutCents: 0,
+    totalPlatformFeeCents: 0,
+  };
 
   const providerCounts = {
-    online: providerSummary.filter((provider) => provider.status === "online").length,
-    busy: providerSummary.filter((provider) => provider.status === "busy").length,
-    offline: providerSummary.filter((provider) => provider.status === "offline").length
+    online: machineSummary.filter((machine) => machine.status === "online").length,
+    busy: machineSummary.filter((machine) => machine.status === "busy").length,
+    offline: machineSummary.filter((machine) => machine.status === "offline").length,
   };
 
   const jobCounts = {
-    queued: jobSummary.filter((job) => job.status === "queued").length,
-    assigned: jobSummary.filter((job) => job.status === "assigned").length,
-    running: jobSummary.filter((job) => job.status === "running").length,
-    completed: jobSummary.filter((job) => job.status === "completed").length,
-    failed: jobSummary.filter((job) => job.status === "failed").length
+    queued: await Job.countDocuments({ status: "queued" }),
+    assigned: 0,
+    running: await Job.countDocuments({ status: "running" }),
+    completed: await Job.countDocuments({ status: "completed" }),
+    failed: await Job.countDocuments({ status: "failed" }),
   };
 
   return {
     providerCounts,
+    machineCounts: providerCounts,
     jobCounts,
-    totalProviderPayoutCents,
-    totalPlatformFeeCents,
+    totalProviderPayoutCents: totals.totalProviderPayoutCents,
+    totalPlatformFeeCents: totals.totalPlatformFeeCents,
     recentJobs: jobSummary,
-    recentActivity: events.map((event) => ({
+    recentActivity: recentActivity.map((event) => ({
       id: String(event._id),
       jobId: String(event.jobId),
-      providerId: event.providerId ? String(event.providerId) : null,
-      providerName: event.providerId ? providerLookup.get(String(event.providerId)) ?? null : null,
+      machineId: event.machineId ? String(event.machineId) : null,
+      machineName: event.machineId
+        ? machineLookup.get(String(event.machineId)) ?? null
+        : null,
+      providerId: event.machineId ? String(event.machineId) : null,
+      providerName: event.machineId
+        ? machineLookup.get(String(event.machineId)) ?? null
+        : null,
       type: event.type,
       message: event.message,
-      createdAt: event.createdAt
+      createdAt: event.createdAt,
     })),
-    providers: providerSummary
+    providers: machineSummary,
+    machines: machineSummary,
   };
 }
 
 export async function listProvidersSummary() {
   await dbConnect();
-  const providers = await Provider.find().sort({ status: 1, totalEarnedCents: -1, name: 1 }).lean();
-  return providers.map(formatProvider);
+  const machines = await Machine.find().sort({ status: 1, totalEarnedCents: -1, name: 1 }).lean();
+  return machines.map(formatMachine);
 }
 
-export async function listJobsSummary() {
+export const listMachinesSummary = listProvidersSummary;
+
+export async function listJobsSummary(input?: { machineId?: string | null }) {
   await dbConnect();
-  const jobs = await Job.find().sort({ createdAt: -1 }).lean();
-  const providerIds = Array.from(new Set(jobs.map((job) => job.assignedProviderId).filter(Boolean).map(String)));
-  const providerLookup = new Map(
-    (
-      providerIds.length
-        ? await Provider.find({ _id: { $in: providerIds } }).lean()
-        : []
-    ).map((provider) => [String(provider._id), provider.name])
-  );
+
+  const filter = input?.machineId ? { machineId: input.machineId } : {};
+  const jobs = await Job.find(filter).sort({ createdAt: -1 }).lean();
+  const machineIds = Array.from(new Set(jobs.map((job) => String(job.machineId))));
+  const machineLookup = await getMachineNameLookup(machineIds);
 
   return jobs.map((job) =>
-    formatJob(job, job.assignedProviderId ? providerLookup.get(String(job.assignedProviderId)) ?? null : null)
+    formatJob(job, machineLookup.get(String(job.machineId)) ?? null)
   );
 }
 
 export async function getJobDetail(id: string) {
   await dbConnect();
+
   const job = await Job.findById(id).lean();
   if (!job) {
     return null;
   }
 
-  const providerName = job.assignedProviderId
-    ? (await Provider.findById(job.assignedProviderId).lean())?.name ?? null
-    : null;
-
+  const machineLookup = await getMachineNameLookup([String(job.machineId)]);
   const events = await JobEvent.find({ jobId: id }).sort({ createdAt: -1 }).lean();
-  const eventProviderIds = Array.from(new Set(events.map((event) => event.providerId?.toString()).filter(Boolean))) as string[];
-  const eventProviderLookup = new Map(
-    (
-      eventProviderIds.length
-        ? await Provider.find({ _id: { $in: eventProviderIds } }).lean()
-        : []
-    ).map((provider) => [String(provider._id), provider.name])
-  );
+  const eventMachineIds = Array.from(
+    new Set(events.map((event) => event.machineId?.toString()).filter(Boolean))
+  ) as string[];
+  const eventMachineLookup = await getMachineNameLookup(eventMachineIds);
 
   return {
-    job: formatJob(job, providerName),
+    job: formatJob(job, machineLookup.get(String(job.machineId)) ?? null),
     events: events.map((event) => ({
       id: String(event._id),
       jobId: String(event.jobId),
-      providerId: event.providerId ? String(event.providerId) : null,
-      providerName: event.providerId ? eventProviderLookup.get(String(event.providerId)) ?? null : null,
+      machineId: event.machineId ? String(event.machineId) : null,
+      machineName: event.machineId
+        ? eventMachineLookup.get(String(event.machineId)) ?? null
+        : null,
+      providerId: event.machineId ? String(event.machineId) : null,
+      providerName: event.machineId
+        ? eventMachineLookup.get(String(event.machineId)) ?? null
+        : null,
       type: event.type,
       message: event.message,
-      createdAt: event.createdAt
-    }))
+      createdAt: event.createdAt,
+    })),
   };
 }
 
 export function getDbUnavailablePayload() {
   return {
     error: "Database unavailable",
-    configured: isDbConfigured()
+    configured: isDbConfigured(),
   };
 }

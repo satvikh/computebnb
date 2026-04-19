@@ -1,6 +1,5 @@
 use std::{
     fs,
-    io::Write,
     net::TcpStream,
     path::PathBuf,
     process::{Child, Command, Stdio},
@@ -9,7 +8,12 @@ use std::{
 };
 
 use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
-use serde::{Deserialize, Serialize};
+use reqwest::{
+    blocking::Client,
+    header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE},
+};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde_json::{json, Value};
 use tauri::{async_runtime::JoinHandle, AppHandle, Emitter};
 
 const STATUS_CHANGED_EVENT: &str = "worker-status-changed";
@@ -24,20 +28,31 @@ const MACHINE_DETECTED_EVENT: &str = "worker-machine-detected";
 const MACHINE_REGISTERED_EVENT: &str = "worker-machine-registered";
 const SETTINGS_UPDATED_EVENT: &str = "worker-settings-updated";
 const SNAPSHOT_EVENT: &str = "worker-snapshot";
+const WORKER_ERROR_EVENT: &str = "worker-error";
+
+const HEARTBEAT_INTERVAL_SECS: u64 = 5;
+const TICK_INTERVAL_MS: u64 = 2000;
 
 #[derive(Clone)]
 pub struct WorkerManager {
     runtime: Arc<Mutex<WorkerRuntime>>,
     task: Arc<Mutex<Option<JoinHandle<()>>>>,
     sandbox_runner: Arc<Mutex<Option<Child>>>,
+    http: Client,
 }
 
 impl WorkerManager {
     pub fn new() -> Self {
+        let http = Client::builder()
+            .timeout(Duration::from_secs(20))
+            .build()
+            .expect("worker http client should initialize");
+
         Self {
             runtime: Arc::new(Mutex::new(WorkerRuntime::new())),
             task: Arc::new(Mutex::new(None)),
             sandbox_runner: Arc::new(Mutex::new(None)),
+            http,
         }
     }
 
@@ -59,6 +74,38 @@ impl WorkerManager {
         );
     }
 
+    fn emit_log(&self, app: &AppHandle, log: JobLog, job_id: Option<String>) {
+        emit_worker_event(
+            app,
+            LOG_EMITTED_EVENT,
+            ActivityLogEvent {
+                event_type: "log_emitted",
+                log,
+                job_id,
+            },
+        );
+    }
+
+    fn emit_error(&self, app: &AppHandle, message: impl Into<String>, recoverable: bool) {
+        emit_worker_event(
+            app,
+            WORKER_ERROR_EVENT,
+            WorkerErrorEvent {
+                event_type: "worker_error",
+                message: message.into(),
+                recoverable,
+            },
+        );
+    }
+
+    fn runner_url(&self) -> String {
+        self.runtime
+            .lock()
+            .expect("worker runtime poisoned")
+            .runner_url
+            .clone()
+    }
+
     fn ensure_runner(&self, app: AppHandle) {
         let mut task = self.task.lock().expect("worker task poisoned");
         if task.is_some() {
@@ -68,7 +115,7 @@ impl WorkerManager {
         let manager = self.clone();
         *task = Some(tauri::async_runtime::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_millis(1900)).await;
+                tokio::time::sleep(Duration::from_millis(TICK_INTERVAL_MS)).await;
                 manager.tick(&app);
             }
         }));
@@ -99,14 +146,20 @@ impl WorkerManager {
             }
         }
 
-        let http_online = TcpStream::connect(("127.0.0.1", 4317)).is_ok();
+        let runner_url = self.runner_url();
+        let http_online = runner_url
+            .strip_prefix("http://")
+            .and_then(parse_host_port)
+            .map(|(host, port)| TcpStream::connect((host.as_str(), port)).is_ok())
+            .unwrap_or_else(|| TcpStream::connect(("127.0.0.1", 4317)).is_ok());
+
         SandboxRunnerStatus {
             running: http_online || managed,
             managed,
             pid,
-            url: "http://localhost:4317".to_string(),
+            url: runner_url.clone(),
             detail: if http_online {
-                "worker-runner is reachable on localhost:4317".to_string()
+                format!("worker-runner is reachable at {runner_url}")
             } else if managed {
                 "worker-runner process is starting".to_string()
             } else {
@@ -115,13 +168,164 @@ impl WorkerManager {
         }
     }
 
-    fn tick(&self, app: &AppHandle) {
-        let events = {
-            let mut runtime = self.runtime.lock().expect("worker runtime poisoned");
-            runtime.tick()
-        };
+    fn ensure_sandbox_runner_ready(&self, app: &AppHandle) -> Result<(), String> {
+        if self.runner_health().is_ok() {
+            return Ok(());
+        }
 
+        let current = self.sandbox_status();
+        if !current.running {
+            let worker_dir = worker_runner_dir()?;
+            let child = spawn_shell("npm run start", Some(worker_dir.clone()))?;
+            {
+                let mut child_guard = self
+                    .sandbox_runner
+                    .lock()
+                    .expect("sandbox runner process poisoned");
+                *child_guard = Some(child);
+            }
+
+            let log = {
+                let mut runtime = self.runtime.lock().expect("worker runtime poisoned");
+                runtime.push_log(
+                    LogLevel::Success,
+                    &format!(
+                        "Docker sandbox runner started from {}.",
+                        worker_dir.to_string_lossy()
+                    ),
+                )
+            };
+            self.emit_log(app, log, None);
+        }
+
+        for _ in 0..24 {
+            if self.runner_health().is_ok() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+
+        Err("worker-runner did not become healthy in time".to_string())
+    }
+
+    fn runner_health(&self) -> Result<(), String> {
+        let runner_url = self.runner_url();
+        let response: RunnerHealthResponse = get_json(
+            &self.http,
+            &format!("{runner_url}/health"),
+            HeaderMap::new(),
+        )?;
+
+        if response.ok {
+            Ok(())
+        } else {
+            Err(response
+                .docker
+                .map(|docker| docker.detail)
+                .unwrap_or_else(|| "worker-runner reported unhealthy state".to_string()))
+        }
+    }
+
+    fn tick(&self, app: &AppHandle) {
+        let mut events = Vec::new();
+        let mut errors = Vec::new();
+
+        let mut runtime = self.runtime.lock().expect("worker runtime poisoned");
+
+        if matches!(runtime.machine.status, WorkerStatus::Offline | WorkerStatus::Error)
+            || (!runtime.active_execution.is_some() && runtime.pause_requested)
+        {
+            runtime.update_idle_metrics();
+            events.push(RuntimeEvent::MetricsUpdated(MetricsUpdateEvent {
+                event_type: "metrics_updated",
+                metrics: runtime.metrics.clone(),
+            }));
+            drop(runtime);
+            emit_events(app, events);
+            for (message, recoverable) in errors {
+                self.emit_error(app, message, recoverable);
+            }
+            self.emit_snapshot(app);
+            return;
+        }
+
+        runtime.machine.uptime_seconds += TICK_INTERVAL_MS / 1000;
+
+        if let Some(session) = runtime.provider_session.clone() {
+            let heartbeat_due = runtime
+                .last_heartbeat_at
+                .map(|at| at.elapsed().as_secs() >= HEARTBEAT_INTERVAL_SECS)
+                .unwrap_or(true);
+
+            if heartbeat_due {
+                match send_heartbeat(&self.http, &runtime.api_url, &session) {
+                    Ok(heartbeat) => {
+                        runtime.network_online = true;
+                        runtime.last_heartbeat_at = Some(Instant::now());
+                        runtime.machine.last_heartbeat_at = Some(now());
+                        runtime.metrics.heartbeat_latency_ms = heartbeat.latency_ms;
+                        runtime.note_network_recovery();
+                        events.push(RuntimeEvent::Heartbeat(HeartbeatEvent {
+                            event_type: "heartbeat",
+                            at: runtime.machine.last_heartbeat_at.clone().unwrap_or_else(now),
+                            latency_ms: heartbeat.latency_ms,
+                            uptime_seconds: runtime.machine.uptime_seconds,
+                        }));
+                    }
+                    Err(error) => {
+                        runtime.network_online = false;
+                        if let Some(message) = runtime.note_network_failure(error) {
+                            errors.push((message, true));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(execution) = runtime.active_execution.clone() {
+            match sync_active_execution(&self.http, &mut runtime, execution) {
+                Ok(sync_events) => events.extend(sync_events),
+                Err(error) => {
+                    if let Some(message) = runtime.note_network_failure(error) {
+                        errors.push((message, true));
+                    }
+                }
+            }
+        } else if !runtime.pause_requested && runtime.settings.auto_accept_jobs {
+            match poll_for_assignment(&self.http, &mut runtime) {
+                Ok(mut poll_events) => events.append(&mut poll_events),
+                Err(error) => {
+                    if let Some(message) = runtime.note_network_failure(error) {
+                        errors.push((message, true));
+                    }
+                }
+            }
+        } else if runtime.active_execution.is_none() && !matches!(runtime.machine.status, WorkerStatus::Paused)
+        {
+            runtime.machine.status = WorkerStatus::Paused;
+            events.push(RuntimeEvent::StatusChanged(WorkerStatusChangedEvent {
+                event_type: "worker_status_changed",
+                status: WorkerStatus::Paused,
+                last_heartbeat_at: runtime.machine.last_heartbeat_at.clone(),
+                uptime_seconds: runtime.machine.uptime_seconds,
+            }));
+        }
+
+        if runtime.active_execution.is_none() && !runtime.pause_requested {
+            runtime.machine.status = WorkerStatus::Idle;
+        }
+
+        runtime.update_metrics_for_current_state();
+        events.push(RuntimeEvent::MetricsUpdated(MetricsUpdateEvent {
+            event_type: "metrics_updated",
+            metrics: runtime.metrics.clone(),
+        }));
+
+        drop(runtime);
         emit_events(app, events);
+        for (message, recoverable) in errors {
+            self.emit_error(app, message, recoverable);
+        }
         self.emit_snapshot(app);
     }
 }
@@ -283,6 +487,21 @@ pub struct SandboxRunnerStatus {
     detail: String,
 }
 
+#[derive(Clone)]
+struct ProviderSession {
+    provider_id: String,
+    provider_token: String,
+}
+
+#[derive(Clone)]
+struct ActiveExecution {
+    remote_job_id: String,
+    runner_job_id: String,
+    last_stdout_len: usize,
+    last_stderr_len: usize,
+    last_state: String,
+}
+
 struct WorkerRuntime {
     registered: bool,
     machine: Machine,
@@ -294,7 +513,13 @@ struct WorkerRuntime {
     network_online: bool,
     worker_logs: Vec<JobLog>,
     rng_seed: u64,
-    job_counter: u32,
+    api_url: String,
+    runner_url: String,
+    provider_session: Option<ProviderSession>,
+    active_execution: Option<ActiveExecution>,
+    pause_requested: bool,
+    last_heartbeat_at: Option<Instant>,
+    last_network_error: Option<String>,
 }
 
 impl WorkerRuntime {
@@ -320,7 +545,7 @@ impl WorkerRuntime {
                 id: "node-local-preview".to_string(),
                 name: local_machine_name(),
                 os: local_os_name(),
-                cpu: "Local CPU provider".to_string(),
+                cpu: "Docker-backed Python worker".to_string(),
                 memory_gb: 16,
                 status: WorkerStatus::Offline,
                 charging: true,
@@ -357,7 +582,7 @@ impl WorkerRuntime {
                     },
                     EarningsPoint {
                         label: "Wed".into(),
-                        amount: 9.6,
+                        amount: 9.60,
                     },
                     EarningsPoint {
                         label: "Thu".into(),
@@ -373,7 +598,7 @@ impl WorkerRuntime {
                     },
                     EarningsPoint {
                         label: "Sun".into(),
-                        amount: 14.7,
+                        amount: 14.70,
                     },
                 ],
             },
@@ -382,10 +607,18 @@ impl WorkerRuntime {
             worker_logs: vec![log(
                 "log-boot",
                 LogLevel::Info,
-                "Control plane ready. Worker is waiting for a secure session.",
+                "Control plane ready. Worker is waiting for backend registration.",
             )],
             rng_seed: 0xC0FFEE,
-            job_counter: 9900,
+            api_url: repo_env("GPUBNB_API_URL").unwrap_or_else(|| "http://localhost:3000".to_string()),
+            runner_url: repo_env("GPUBNB_WORKER_RUNNER_URL")
+                .or_else(|| repo_env("WORKER_RUNNER_URL"))
+                .unwrap_or_else(|| "http://localhost:4317".to_string()),
+            provider_session: None,
+            active_execution: None,
+            pause_requested: false,
+            last_heartbeat_at: None,
+            last_network_error: None,
         }
     }
 
@@ -400,6 +633,35 @@ impl WorkerRuntime {
             settings: self.settings.clone(),
             network_online: self.network_online,
             worker_logs: self.worker_logs.clone(),
+        }
+    }
+
+    fn push_log(&mut self, level: LogLevel, message: &str) -> JobLog {
+        let log = log_with_random_id(&mut self.rng_seed, level, message);
+        self.worker_logs.insert(0, log.clone());
+        self.worker_logs.truncate(20);
+        log
+    }
+
+    fn note_network_failure(&mut self, error: String) -> Option<String> {
+        if self.last_network_error.as_deref() == Some(error.as_str()) {
+            return None;
+        }
+
+        self.last_network_error = Some(error.clone());
+        let log = self.push_log(
+            LogLevel::Warning,
+            &format!("Backend connectivity degraded: {error}"),
+        );
+        Some(log.message)
+    }
+
+    fn note_network_recovery(&mut self) {
+        if self.last_network_error.take().is_some() {
+            self.push_log(
+                LogLevel::Success,
+                "Backend connectivity restored. Polling and heartbeats resumed.",
+            );
         }
     }
 
@@ -434,338 +696,45 @@ impl WorkerRuntime {
         })]
     }
 
-    fn tick(&mut self) -> Vec<RuntimeEvent> {
-        if matches!(
-            self.machine.status,
-            WorkerStatus::Offline | WorkerStatus::Paused | WorkerStatus::Error
-        ) {
+    fn update_idle_metrics(&mut self) {
+        self.metrics.cpu_usage = clamp(7.0 + self.range(-2.0, 2.0), 2.0, 16.0);
+        self.metrics.memory_usage = clamp(27.0 + self.range(-2.0, 3.0), 20.0, 38.0);
+        self.metrics.temperature_c = clamp(39.0 + self.range(-1.0, 2.0), 36.0, 47.0);
+        self.metrics.network_mbps = clamp(96.0 + self.range(-18.0, 22.0), 40.0, 180.0);
+        self.metrics.battery_percent = clamp(self.metrics.battery_percent - 0.02, 1.0, 100.0);
+    }
+
+    fn update_metrics_for_current_state(&mut self) {
+        if let Some(job) = self.active_job.clone() {
             self.metrics.cpu_usage =
-                clamp(self.metrics.cpu_usage + self.range(-2.0, 2.0), 2.0, 14.0);
-            self.metrics.memory_usage = clamp(
-                self.metrics.memory_usage + self.range(-1.0, 1.0),
-                20.0,
-                34.0,
-            );
-            self.metrics.battery_percent = clamp(self.metrics.battery_percent - 0.01, 1.0, 100.0);
-            self.metrics.temperature_c = clamp(
-                self.metrics.temperature_c + self.range(-1.0, 1.0),
-                37.0,
-                45.0,
-            );
-            return vec![RuntimeEvent::MetricsUpdated(MetricsUpdateEvent {
-                event_type: "metrics_updated",
-                metrics: self.metrics.clone(),
-            })];
+                clamp(job.cpu_usage + self.range(-4.0, 6.0), 18.0, self.settings.cpu_limit);
+            self.metrics.memory_usage = clamp(job.memory_usage + self.range(-3.0, 4.0), 24.0, 80.0);
+            self.metrics.temperature_c = clamp(48.0 + self.range(-2.0, 5.0), 40.0, 79.0);
+            self.metrics.network_mbps = clamp(82.0 + self.range(-18.0, 36.0), 20.0, 220.0);
+            self.metrics.battery_percent = clamp(self.metrics.battery_percent - 0.06, 1.0, 100.0);
+            return;
         }
 
-        self.machine.uptime_seconds += 2;
-        let heartbeat_at = now();
-        let latency = self.range(18.0, 46.0).round() as u32;
-        self.machine.last_heartbeat_at = Some(heartbeat_at.clone());
-        self.metrics.heartbeat_latency_ms = latency;
-
-        let mut events = vec![RuntimeEvent::Heartbeat(HeartbeatEvent {
-            event_type: "heartbeat",
-            at: heartbeat_at,
-            latency_ms: latency,
-            uptime_seconds: self.machine.uptime_seconds,
-        })];
-
-        if self.active_job.is_none()
-            && self.settings.auto_accept_jobs
-            && !matches!(self.machine.status, WorkerStatus::Busy)
-            && (self.machine.uptime_seconds >= 4 || self.next_unit() > 0.68)
-        {
-            let job = self.create_job();
-            self.machine.status = WorkerStatus::Busy;
-            self.active_job = Some(job.clone());
-            let log = self.push_log(
-                LogLevel::Success,
-                &format!("Scheduler assigned {}.", job.name),
-            );
-
-            self.metrics.cpu_usage = clamp(
-                job.cpu_usage + self.range(0.0, 8.0),
-                35.0,
-                self.settings.cpu_limit,
-            );
-            self.metrics.memory_usage = clamp(job.memory_usage + self.range(0.0, 5.0), 28.0, 72.0);
-            self.metrics.temperature_c = clamp(self.metrics.temperature_c + 2.0, 39.0, 72.0);
-
-            events.push(RuntimeEvent::StatusChanged(WorkerStatusChangedEvent {
-                event_type: "worker_status_changed",
-                status: WorkerStatus::Busy,
-                last_heartbeat_at: self.machine.last_heartbeat_at.clone(),
-                uptime_seconds: self.machine.uptime_seconds,
-            }));
-            events.push(RuntimeEvent::JobAssigned(JobAssignedEvent {
-                event_type: "job_assigned",
-                job: job.clone(),
-            }));
-            events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
-                event_type: "log_emitted",
-                log,
-                job_id: Some(job.id),
-            }));
-            events.push(RuntimeEvent::MetricsUpdated(MetricsUpdateEvent {
-                event_type: "metrics_updated",
-                metrics: self.metrics.clone(),
-            }));
-            return events;
-        }
-
-        if self.active_job.is_none() {
-            self.machine.status = WorkerStatus::Idle;
-            self.metrics.cpu_usage = clamp(12.0 + self.range(0.0, 10.0), 8.0, 24.0);
-            self.metrics.memory_usage = clamp(29.0 + self.range(0.0, 8.0), 24.0, 42.0);
-            self.metrics.temperature_c = clamp(40.0 + self.range(0.0, 5.0), 38.0, 50.0);
-            self.metrics.network_mbps = clamp(105.0 + self.range(0.0, 44.0), 60.0, 180.0);
-            events.push(RuntimeEvent::StatusChanged(WorkerStatusChangedEvent {
-                event_type: "worker_status_changed",
-                status: WorkerStatus::Idle,
-                last_heartbeat_at: self.machine.last_heartbeat_at.clone(),
-                uptime_seconds: self.machine.uptime_seconds,
-            }));
-            events.push(RuntimeEvent::MetricsUpdated(MetricsUpdateEvent {
-                event_type: "metrics_updated",
-                metrics: self.metrics.clone(),
-            }));
-            return events;
-        }
-
-        let mut completed_job = None;
-        let mut progress_log = None;
-        let earning_bump = self.range(0.22, 0.67);
-        let cpu_usage = clamp(
-            40.0 + self.range(0.0, self.settings.cpu_limit),
-            24.0,
-            self.settings.cpu_limit,
-        );
-        let memory_usage = clamp(36.0 + self.range(0.0, 22.0), 26.0, 70.0);
-
-        if let Some(job) = &mut self.active_job {
-            job.progress = 35.0;
-            job.earnings = money(job.earnings + earning_bump);
-            job.cpu_usage = cpu_usage;
-            job.memory_usage = memory_usage;
-
-            let start_log = log_with_random_id(
-                &mut self.rng_seed,
-                LogLevel::Info,
-                "Launching bounded local script executor.",
-            );
-            job.logs.insert(0, start_log.clone());
-            progress_log = Some((job.id.clone(), start_log));
-
-            match execute_demo_script(&job.id, &job.name, &job.job_type) {
-                Ok(output) => {
-                    job.status = JobStatus::Completed;
-                    job.progress = 100.0;
-                    job.execution_output = Some(output.summary.clone());
-                    job.execution_error = None;
-                    let output_log = log_with_random_id(
-                        &mut self.rng_seed,
-                        LogLevel::Info,
-                        &format!("Executor stdout: {}", output.summary),
-                    );
-                    let done_log = log_with_random_id(
-                        &mut self.rng_seed,
-                        LogLevel::Success,
-                        &format!(
-                            "Script finished in {}ms. Results delivered and payout credited.",
-                            output.duration_ms
-                        ),
-                    );
-                    job.logs.insert(0, done_log);
-                    job.logs.insert(1, output_log);
-                    job.logs.truncate(16);
-                    completed_job = Some(job.clone());
-                }
-                Err(error) => {
-                    job.status = JobStatus::Failed;
-                    job.progress = 100.0;
-                    job.execution_error = Some(error.clone());
-                    let error_log = log_with_random_id(
-                        &mut self.rng_seed,
-                        LogLevel::Error,
-                        &format!("Executor failed: {}", error),
-                    );
-                    job.logs.insert(0, error_log);
-                    job.logs.truncate(16);
-                    completed_job = Some(job.clone());
-                }
-            }
-        }
-
-        self.metrics.cpu_usage = cpu_usage;
-        self.metrics.memory_usage = memory_usage;
-        self.metrics.battery_percent = clamp(self.metrics.battery_percent - 0.03, 1.0, 100.0);
-        self.metrics.temperature_c =
-            clamp(43.0 + cpu_usage / 5.0 + self.range(0.0, 3.0), 40.0, 78.0);
-        self.metrics.network_mbps = clamp(90.0 + self.range(0.0, 80.0), 48.0, 220.0);
-
-        if let Some((job_id, log)) = progress_log {
-            events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
-                event_type: "log_emitted",
-                log,
-                job_id: Some(job_id),
-            }));
-        }
-
-        events.push(RuntimeEvent::MetricsUpdated(MetricsUpdateEvent {
-            event_type: "metrics_updated",
-            metrics: self.metrics.clone(),
-        }));
-
-        if let Some(job) = completed_job {
-            self.active_job = None;
-            self.machine.status = WorkerStatus::Idle;
-            self.recent_jobs.insert(0, job.clone());
-            self.recent_jobs.truncate(8);
-            let job_succeeded = matches!(&job.status, JobStatus::Completed);
-            if job_succeeded {
-                self.earnings.lifetime = money(self.earnings.lifetime + job.earnings);
-                self.earnings.pending = money(self.earnings.pending + job.earnings);
-                self.earnings.today = money(self.earnings.today + job.earnings);
-                self.earnings.completed_jobs += 1;
-                if let Some(point) = self.earnings.history.last_mut() {
-                    point.amount = money(point.amount + job.earnings);
-                }
-            }
-
-            let log = if job_succeeded {
-                let output = job
-                    .execution_output
-                    .clone()
-                    .unwrap_or_else(|| "no stdout".to_string());
-                self.push_log(
-                    LogLevel::Success,
-                    &format!(
-                        "{} completed by local executor. Output: {}. Earned ${:.2}.",
-                        job.name, output, job.earnings
-                    ),
-                )
-            } else {
-                let error = job
-                    .execution_error
-                    .clone()
-                    .unwrap_or_else(|| "unknown executor error".to_string());
-                self.push_log(
-                    LogLevel::Error,
-                    &format!("{} failed in local executor: {}.", job.name, error),
-                )
-            };
-            events.push(RuntimeEvent::JobCompleted(JobCompletedEvent {
-                event_type: "job_completed",
-                job,
-                recent_jobs: self.recent_jobs.clone(),
-            }));
-            if job_succeeded {
-                events.push(RuntimeEvent::EarningsUpdated(EarningsUpdateEvent {
-                    event_type: "earnings_updated",
-                    earnings: self.earnings.clone(),
-                }));
-            }
-            events.push(RuntimeEvent::StatusChanged(WorkerStatusChangedEvent {
-                event_type: "worker_status_changed",
-                status: WorkerStatus::Idle,
-                last_heartbeat_at: self.machine.last_heartbeat_at.clone(),
-                uptime_seconds: self.machine.uptime_seconds,
-            }));
-            events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
-                event_type: "log_emitted",
-                log,
-                job_id: None,
-            }));
-        } else if let Some(job) = self.active_job.clone() {
-            events.push(RuntimeEvent::JobProgress(JobProgressEvent {
-                event_type: "job_progress",
-                job,
-            }));
-        }
-
-        events
-    }
-
-    fn create_job(&mut self) -> Job {
-        self.job_counter += 1;
-        let names = [
-            "Neural texture baking batch",
-            "Monte Carlo pricing sweep",
-            "Synthetic dataset generation",
-            "CI compile acceleration shard",
-            "Video thumbnail render pack",
-        ];
-        let job_types = [
-            JobType::Render,
-            JobType::Simulation,
-            JobType::BatchInference,
-            JobType::Compile,
-            JobType::DataCleaning,
-        ];
-        let index = (self.next_unit() * names.len() as f64).floor() as usize;
-        let type_index = (self.next_unit() * job_types.len() as f64).floor() as usize;
-        let started_at = Utc::now();
-
-        Job {
-            id: format!("job-{}", self.job_counter),
-            name: names[index.min(names.len() - 1)].to_string(),
-            job_type: job_types[type_index.min(job_types.len() - 1)].clone(),
-            status: JobStatus::Running,
-            progress: 2.0,
-            started_at: Some(started_at.to_rfc3339_opts(SecondsFormat::Millis, true)),
-            estimated_completion_at: Some(
-                (started_at + ChronoDuration::seconds(55))
-                    .to_rfc3339_opts(SecondsFormat::Millis, true),
-            ),
-            earnings: 0.08,
-            cpu_usage: 48.0,
-            memory_usage: 32.0,
-            logs: vec![
-                log_with_random_id(
-                    &mut self.rng_seed,
-                    LogLevel::Success,
-                    "Job accepted automatically. Preparing isolated runtime.",
-                ),
-                log_with_random_id(
-                    &mut self.rng_seed,
-                    LogLevel::Info,
-                    "Runtime attestation complete.",
-                ),
-            ],
-            execution_output: None,
-            execution_error: None,
-        }
-    }
-
-    fn push_log(&mut self, level: LogLevel, message: &str) -> JobLog {
-        let log = log_with_random_id(&mut self.rng_seed, level, message);
-        self.worker_logs.insert(0, log.clone());
-        self.worker_logs.truncate(40);
-        log
-    }
-
-    fn next_unit(&mut self) -> f64 {
-        next_unit(&mut self.rng_seed)
+        self.update_idle_metrics();
     }
 
     fn range(&mut self, min: f64, max: f64) -> f64 {
-        min + (max - min) * self.next_unit()
+        min + (max - min) * next_unit(&mut self.rng_seed)
     }
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkerStatusChangedEvent {
     #[serde(rename = "type")]
     event_type: &'static str,
     status: WorkerStatus,
-    #[serde(rename = "lastHeartbeatAt")]
     last_heartbeat_at: Option<String>,
-    #[serde(rename = "uptimeSeconds")]
     uptime_seconds: u64,
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct MachineDetectedEvent {
     #[serde(rename = "type")]
     event_type: &'static str,
@@ -773,6 +742,7 @@ struct MachineDetectedEvent {
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct MachineRegisteredEvent {
     #[serde(rename = "type")]
     event_type: &'static str,
@@ -781,17 +751,17 @@ struct MachineRegisteredEvent {
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct HeartbeatEvent {
     #[serde(rename = "type")]
     event_type: &'static str,
     at: String,
-    #[serde(rename = "latencyMs")]
     latency_ms: u32,
-    #[serde(rename = "uptimeSeconds")]
     uptime_seconds: u64,
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct JobAssignedEvent {
     #[serde(rename = "type")]
     event_type: &'static str,
@@ -799,6 +769,7 @@ struct JobAssignedEvent {
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct JobProgressEvent {
     #[serde(rename = "type")]
     event_type: &'static str,
@@ -806,15 +777,16 @@ struct JobProgressEvent {
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct JobCompletedEvent {
     #[serde(rename = "type")]
     event_type: &'static str,
     job: Job,
-    #[serde(rename = "recentJobs")]
     recent_jobs: Vec<Job>,
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct MetricsUpdateEvent {
     #[serde(rename = "type")]
     event_type: &'static str,
@@ -822,6 +794,7 @@ struct MetricsUpdateEvent {
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct EarningsUpdateEvent {
     #[serde(rename = "type")]
     event_type: &'static str,
@@ -829,15 +802,16 @@ struct EarningsUpdateEvent {
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ActivityLogEvent {
     #[serde(rename = "type")]
     event_type: &'static str,
     log: JobLog,
-    #[serde(rename = "jobId")]
     job_id: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SettingsUpdatedEvent {
     #[serde(rename = "type")]
     event_type: &'static str,
@@ -845,10 +819,20 @@ struct SettingsUpdatedEvent {
 }
 
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SnapshotEvent {
     #[serde(rename = "type")]
     event_type: &'static str,
     snapshot: WorkerRuntimeSnapshot,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkerErrorEvent {
+    #[serde(rename = "type")]
+    event_type: &'static str,
+    message: String,
+    recoverable: bool,
 }
 
 enum RuntimeEvent {
@@ -870,16 +854,10 @@ fn emit_events(app: &AppHandle, events: Vec<RuntimeEvent>) {
                 emit_worker_event(app, STATUS_CHANGED_EVENT, payload)
             }
             RuntimeEvent::Heartbeat(payload) => emit_worker_event(app, HEARTBEAT_EVENT, payload),
-            RuntimeEvent::JobAssigned(payload) => {
-                emit_worker_event(app, JOB_ASSIGNED_EVENT, payload)
-            }
-            RuntimeEvent::JobProgress(payload) => {
-                emit_worker_event(app, JOB_PROGRESS_EVENT, payload)
-            }
+            RuntimeEvent::JobAssigned(payload) => emit_worker_event(app, JOB_ASSIGNED_EVENT, payload),
+            RuntimeEvent::JobProgress(payload) => emit_worker_event(app, JOB_PROGRESS_EVENT, payload),
             RuntimeEvent::LogEmitted(payload) => emit_worker_event(app, LOG_EMITTED_EVENT, payload),
-            RuntimeEvent::JobCompleted(payload) => {
-                emit_worker_event(app, JOB_COMPLETED_EVENT, payload)
-            }
+            RuntimeEvent::JobCompleted(payload) => emit_worker_event(app, JOB_COMPLETED_EVENT, payload),
             RuntimeEvent::MetricsUpdated(payload) => {
                 emit_worker_event(app, METRICS_UPDATED_EVENT, payload)
             }
@@ -897,6 +875,171 @@ fn emit_worker_event<T: Serialize + Clone>(app: &AppHandle, event_name: &str, pa
     let _ = app.emit(event_name, payload);
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderRegisterResponse {
+    provider: RegisteredProvider,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisteredProvider {
+    id: String,
+    name: String,
+    token: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderHeartbeatResponse {
+    provider: ProviderHeartbeatProvider,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderHeartbeatProvider {
+    #[serde(default)]
+    last_heartbeat_at: Option<String>,
+}
+
+struct HeartbeatReceipt {
+    latency_ms: u32,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemotePollResponse {
+    assignment: Option<RemoteAssignment>,
+    job: Option<RemoteMarketplaceJob>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteAssignment {
+    id: String,
+    job_id: String,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteMarketplaceJob {
+    id: String,
+    title: String,
+    #[serde(rename = "type")]
+    job_type: String,
+    input: String,
+    #[serde(default)]
+    runner_payload: Option<Value>,
+    #[serde(default)]
+    budget_cents: Option<u32>,
+    #[serde(default)]
+    provider_payout_cents: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteCompletionResponse {
+    job: RemoteCompletedJob,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteCompletedJob {
+    #[serde(default)]
+    provider_payout_cents: Option<u32>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunnerExecuteRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(rename = "type")]
+    job_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    script: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    limits: Option<RunnerExecuteLimits>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RunnerExecuteLimits {
+    timeout_ms: u32,
+    cpus: f64,
+    memory_mb: u32,
+    pids_limit: u32,
+    log_limit_bytes: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunnerExecuteResponse {
+    job: RunnerJobRecord,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunnerJobResponse {
+    job: RunnerJobRecord,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunnerJobRecord {
+    id: String,
+    #[serde(rename = "type")]
+    job_type: String,
+    state: String,
+    image: String,
+    logs: RunnerLogs,
+    #[serde(default)]
+    result: Option<RunnerExecutionResult>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunnerLogs {
+    stdout: String,
+    stderr: String,
+    truncated: bool,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunnerExecutionResult {
+    exit_code: Option<i32>,
+    start_time: String,
+    end_time: String,
+    duration_ms: u128,
+    logs: RunnerLogs,
+    artifact_paths: Vec<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunnerHealthResponse {
+    ok: bool,
+    #[serde(default)]
+    docker: Option<RunnerHealthDocker>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunnerHealthDocker {
+    detail: String,
+}
+
 #[tauri::command]
 pub fn detect_machine(app: AppHandle, manager: tauri::State<'_, WorkerManager>) -> Machine {
     let machine = {
@@ -905,6 +1048,7 @@ pub fn detect_machine(app: AppHandle, manager: tauri::State<'_, WorkerManager>) 
         runtime.machine.os = local_os_name();
         runtime.machine.clone()
     };
+
     emit_worker_event(
         &app,
         MACHINE_DETECTED_EVENT,
@@ -923,34 +1067,71 @@ pub fn register_machine(
     manager: tauri::State<'_, WorkerManager>,
     settings: WorkerSettings,
 ) -> WorkerRuntimeSnapshot {
-    {
-        let mut runtime = manager.runtime.lock().expect("worker runtime poisoned");
-        runtime.registered = true;
-        runtime.update_settings(settings);
-        runtime.machine.id = "native-node-preview".to_string();
-        let log = runtime.push_log(
-            LogLevel::Success,
-            "Machine registered and trust policy saved.",
-        );
-        emit_worker_event(
-            &app,
-            LOG_EMITTED_EVENT,
-            ActivityLogEvent {
+    let mut runtime = manager.runtime.lock().expect("worker runtime poisoned");
+    let mut events = runtime.update_settings(settings);
+    runtime.machine.name = local_machine_name();
+    runtime.machine.os = local_os_name();
+    runtime.machine.cpu = "Docker-backed Python worker".to_string();
+
+    let registration = register_provider(&manager.http, &runtime.api_url, &runtime.machine);
+    match registration {
+        Ok(provider) => {
+            runtime.registered = true;
+            runtime.provider_session = Some(ProviderSession {
+                provider_id: provider.id.clone(),
+                provider_token: provider.token.clone(),
+            });
+            runtime.machine.id = provider.id;
+            runtime.machine.status = WorkerStatus::Offline;
+            runtime.pause_requested = false;
+            let log = runtime.push_log(
+                LogLevel::Success,
+                &format!("Machine registered with backend as {}.", provider.name),
+            );
+            events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
                 event_type: "log_emitted",
                 log,
                 job_id: None,
-            },
-        );
-        emit_worker_event(
-            &app,
-            MACHINE_REGISTERED_EVENT,
-            MachineRegisteredEvent {
-                event_type: "machine_registered",
-                machine: runtime.machine.clone(),
-                settings: runtime.settings.clone(),
-            },
-        );
+            }));
+            emit_worker_event(
+                &app,
+                MACHINE_REGISTERED_EVENT,
+                MachineRegisteredEvent {
+                    event_type: "machine_registered",
+                    machine: runtime.machine.clone(),
+                    settings: runtime.settings.clone(),
+                },
+            );
+        }
+        Err(error) => {
+            runtime.registered = false;
+            runtime.provider_session = None;
+            runtime.machine.status = WorkerStatus::Error;
+            let log = runtime.push_log(
+                LogLevel::Error,
+                &format!("Backend registration failed: {error}"),
+            );
+            events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
+                event_type: "log_emitted",
+                log,
+                job_id: None,
+            }));
+            events.push(RuntimeEvent::StatusChanged(WorkerStatusChangedEvent {
+                event_type: "worker_status_changed",
+                status: WorkerStatus::Error,
+                last_heartbeat_at: runtime.machine.last_heartbeat_at.clone(),
+                uptime_seconds: runtime.machine.uptime_seconds,
+            }));
+            drop(runtime);
+            emit_events(&app, events);
+            manager.emit_error(&app, error, false);
+            manager.emit_snapshot(&app);
+            return manager.snapshot();
+        }
     }
+
+    drop(runtime);
+    emit_events(&app, events);
     manager.emit_snapshot(&app);
     manager.snapshot()
 }
@@ -960,12 +1141,47 @@ pub fn start_worker(
     app: AppHandle,
     manager: tauri::State<'_, WorkerManager>,
 ) -> WorkerRuntimeSnapshot {
+    if let Err(error) = manager.ensure_sandbox_runner_ready(&app) {
+        let snapshot = {
+            let mut runtime = manager.runtime.lock().expect("worker runtime poisoned");
+            runtime.machine.status = WorkerStatus::Error;
+            let log = runtime.push_log(
+                LogLevel::Error,
+                &format!("Unable to start Docker runner: {error}"),
+            );
+            manager.emit_log(&app, log, None);
+            runtime.snapshot()
+        };
+        manager.emit_error(&app, error, false);
+        manager.emit_snapshot(&app);
+        return snapshot;
+    }
+
     let events = {
         let mut runtime = manager.runtime.lock().expect("worker runtime poisoned");
+        if !runtime.registered || runtime.provider_session.is_none() {
+            runtime.machine.status = WorkerStatus::Error;
+            let log = runtime.push_log(
+                LogLevel::Error,
+                "Register this machine before starting the worker.",
+            );
+            manager.emit_log(&app, log, None);
+            manager.emit_error(
+                &app,
+                "Worker start rejected because the machine is not registered.",
+                false,
+            );
+            let snapshot = runtime.snapshot();
+            manager.emit_snapshot(&app);
+            return snapshot;
+        }
+
+        runtime.pause_requested = false;
+        runtime.machine.uptime_seconds = 0;
         let mut events = runtime.set_status(WorkerStatus::Idle);
         let log = runtime.push_log(
             LogLevel::Success,
-            "Worker started. Establishing scheduler session.",
+            "Worker started. Polling backend for assigned jobs and using Docker runner for execution.",
         );
         events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
             event_type: "log_emitted",
@@ -974,6 +1190,7 @@ pub fn start_worker(
         }));
         events
     };
+
     emit_events(&app, events);
     manager.ensure_runner(app.clone());
     manager.emit_snapshot(&app);
@@ -986,17 +1203,32 @@ pub fn stop_worker(
     manager: tauri::State<'_, WorkerManager>,
 ) -> WorkerRuntimeSnapshot {
     manager.stop_runner();
+    let cancel_error = cancel_remote_execution(
+        &manager.http,
+        &mut manager.runtime.lock().expect("worker runtime poisoned"),
+        "Worker stopped by owner before completion.",
+    );
+
     let events = {
         let mut runtime = manager.runtime.lock().expect("worker runtime poisoned");
-        if let Some(job) = &mut runtime.active_job {
-            job.status = JobStatus::Paused;
-        }
+        runtime.pause_requested = false;
+        runtime.active_execution = None;
+        runtime.active_job = None;
         runtime.machine.uptime_seconds = 0;
         runtime.metrics.cpu_usage = 5.0;
         runtime.metrics.memory_usage = 25.0;
         runtime.metrics.heartbeat_latency_ms = 0;
         let mut events = runtime.set_status(WorkerStatus::Offline);
-        let log = runtime.push_log(LogLevel::Warning, "Worker stopped by owner.");
+        let message = match cancel_error {
+            Some(ref error) => format!("Worker stopped, but remote cancellation failed: {error}"),
+            None => "Worker stopped by owner.".to_string(),
+        };
+        let level = if cancel_error.is_some() {
+            LogLevel::Warning
+        } else {
+            LogLevel::Info
+        };
+        let log = runtime.push_log(level, &message);
         events.push(RuntimeEvent::MetricsUpdated(MetricsUpdateEvent {
             event_type: "metrics_updated",
             metrics: runtime.metrics.clone(),
@@ -1008,7 +1240,11 @@ pub fn stop_worker(
         }));
         events
     };
+
     emit_events(&app, events);
+    if let Some(error) = cancel_error {
+        manager.emit_error(&app, error, true);
+    }
     manager.emit_snapshot(&app);
     manager.snapshot()
 }
@@ -1020,14 +1256,19 @@ pub fn pause_worker(
 ) -> WorkerRuntimeSnapshot {
     let events = {
         let mut runtime = manager.runtime.lock().expect("worker runtime poisoned");
-        if let Some(job) = &mut runtime.active_job {
-            job.status = JobStatus::Paused;
-        }
-        let mut events = runtime.set_status(WorkerStatus::Paused);
-        let log = runtime.push_log(
-            LogLevel::Warning,
-            "Worker paused. No new jobs will be accepted.",
-        );
+        runtime.pause_requested = true;
+        let status = if runtime.active_execution.is_some() {
+            WorkerStatus::Busy
+        } else {
+            WorkerStatus::Paused
+        };
+        let mut events = runtime.set_status(status);
+        let message = if runtime.active_execution.is_some() {
+            "Pause requested. The current Docker job will finish, then polling will stop."
+        } else {
+            "Worker paused. No new jobs will be accepted."
+        };
+        let log = runtime.push_log(LogLevel::Warning, message);
         events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
             event_type: "log_emitted",
             log,
@@ -1035,6 +1276,7 @@ pub fn pause_worker(
         }));
         events
     };
+
     emit_events(&app, events);
     manager.emit_snapshot(&app);
     manager.snapshot()
@@ -1047,10 +1289,8 @@ pub fn resume_worker(
 ) -> WorkerRuntimeSnapshot {
     let events = {
         let mut runtime = manager.runtime.lock().expect("worker runtime poisoned");
-        if let Some(job) = &mut runtime.active_job {
-            job.status = JobStatus::Running;
-        }
-        let status = if runtime.active_job.is_some() {
+        runtime.pause_requested = false;
+        let status = if runtime.active_execution.is_some() {
             WorkerStatus::Busy
         } else {
             WorkerStatus::Idle
@@ -1064,6 +1304,7 @@ pub fn resume_worker(
         }));
         events
     };
+
     emit_events(&app, events);
     manager.ensure_runner(app.clone());
     manager.emit_snapshot(&app);
@@ -1096,18 +1337,27 @@ pub fn emergency_stop(
     manager: tauri::State<'_, WorkerManager>,
 ) -> WorkerRuntimeSnapshot {
     manager.stop_runner();
+    let cancel_error = cancel_remote_execution(
+        &manager.http,
+        &mut manager.runtime.lock().expect("worker runtime poisoned"),
+        "Emergency stop requested by owner.",
+    );
+
     let events = {
         let mut runtime = manager.runtime.lock().expect("worker runtime poisoned");
+        runtime.pause_requested = false;
+        runtime.active_execution = None;
         runtime.active_job = None;
         runtime.machine.uptime_seconds = 0;
         runtime.metrics.cpu_usage = 3.0;
         runtime.metrics.memory_usage = 22.0;
         runtime.metrics.heartbeat_latency_ms = 0;
         let mut events = runtime.set_status(WorkerStatus::Offline);
-        let log = runtime.push_log(
-            LogLevel::Error,
-            "Emergency disconnect complete. Credentials remain local.",
-        );
+        let message = match cancel_error {
+            Some(ref error) => format!("Emergency disconnect complete, but job cleanup failed: {error}"),
+            None => "Emergency disconnect complete. Active job was canceled and backend notified.".to_string(),
+        };
+        let log = runtime.push_log(LogLevel::Error, &message);
         events.push(RuntimeEvent::MetricsUpdated(MetricsUpdateEvent {
             event_type: "metrics_updated",
             metrics: runtime.metrics.clone(),
@@ -1119,7 +1369,11 @@ pub fn emergency_stop(
         }));
         events
     };
+
     emit_events(&app, events);
+    if let Some(error) = cancel_error {
+        manager.emit_error(&app, error, true);
+    }
     manager.emit_snapshot(&app);
     manager.snapshot()
 }
@@ -1150,42 +1404,7 @@ pub fn start_sandbox_runner(
     app: AppHandle,
     manager: tauri::State<'_, WorkerManager>,
 ) -> Result<SandboxRunnerStatus, String> {
-    let current = manager.sandbox_status();
-    if current.running {
-        return Ok(current);
-    }
-
-    let worker_dir = worker_runner_dir()?;
-    let child = spawn_shell("npm run start", Some(worker_dir.clone()))?;
-    {
-        let mut child_guard = manager
-            .sandbox_runner
-            .lock()
-            .expect("sandbox runner process poisoned");
-        *child_guard = Some(child);
-    }
-
-    {
-        let mut runtime = manager.runtime.lock().expect("worker runtime poisoned");
-        let log = runtime.push_log(
-            LogLevel::Success,
-            &format!(
-                "Docker sandbox runner started from {}.",
-                worker_dir.to_string_lossy()
-            ),
-        );
-        emit_worker_event(
-            &app,
-            LOG_EMITTED_EVENT,
-            ActivityLogEvent {
-                event_type: "log_emitted",
-                log,
-                job_id: None,
-            },
-        );
-    }
-    manager.emit_snapshot(&app);
-
+    manager.ensure_sandbox_runner_ready(&app)?;
     Ok(manager.sandbox_status())
 }
 
@@ -1216,19 +1435,723 @@ pub fn stop_sandbox_runner(
             "No app-managed sandbox runner process was active."
         };
         let log = runtime.push_log(LogLevel::Warning, message);
-        emit_worker_event(
-            &app,
-            LOG_EMITTED_EVENT,
-            ActivityLogEvent {
-                event_type: "log_emitted",
-                log,
-                job_id: None,
-            },
-        );
+        manager.emit_log(&app, log, None);
     }
     manager.emit_snapshot(&app);
 
     Ok(manager.sandbox_status())
+}
+
+fn register_provider(
+    http: &Client,
+    api_url: &str,
+    machine: &Machine,
+) -> Result<RegisteredProvider, String> {
+    let response: ProviderRegisterResponse = post_json(
+        http,
+        &format!("{api_url}/api/providers/register"),
+        HeaderMap::new(),
+        &json!({
+            "name": machine.name,
+            "capabilities": ["cpu", "node", "docker", "python"],
+            "hourlyRateCents": 300
+        }),
+    )?;
+
+    Ok(response.provider)
+}
+
+fn send_heartbeat(
+    http: &Client,
+    api_url: &str,
+    session: &ProviderSession,
+) -> Result<HeartbeatReceipt, String> {
+    let started = Instant::now();
+    let response: ProviderHeartbeatResponse = post_json(
+        http,
+        &format!("{api_url}/api/providers/heartbeat"),
+        auth_headers(session)?,
+        &json!({
+            "providerId": session.provider_id
+        }),
+    )?;
+
+    let _ = response.provider.last_heartbeat_at;
+    Ok(HeartbeatReceipt {
+        latency_ms: started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32,
+    })
+}
+
+fn poll_for_assignment(http: &Client, runtime: &mut WorkerRuntime) -> Result<Vec<RuntimeEvent>, String> {
+    let session = runtime
+        .provider_session
+        .clone()
+        .ok_or_else(|| "worker is not registered with a provider session".to_string())?;
+    let response: RemotePollResponse = post_json(
+        http,
+        &format!("{}/api/worker/poll", runtime.api_url),
+        auth_headers(&session)?,
+        &json!({
+            "providerId": session.provider_id
+        }),
+    )?;
+
+    let Some(assignment) = response.assignment else {
+        return Ok(vec![]);
+    };
+    let Some(job) = response.job else {
+        return Ok(vec![]);
+    };
+
+    let start_path = format!("{}/api/jobs/{}/start", runtime.api_url, job.id);
+    let _: Value = post_json(
+        http,
+        &start_path,
+        auth_headers(&session)?,
+        &json!({
+            "providerId": session.provider_id
+        }),
+    )?;
+
+    let runner_request = runner_request_for_marketplace_job(&job);
+    let runner_response: RunnerExecuteResponse = post_json(
+        http,
+        &format!("{}/jobs/execute", runtime.runner_url),
+        runner_headers()?,
+        &runner_request,
+    )?;
+
+    let started_at = now();
+    let estimated_completion_at = (Utc::now() + ChronoDuration::seconds(30))
+        .to_rfc3339_opts(SecondsFormat::Millis, true);
+    let ui_job = Job {
+        id: job.id.clone(),
+        name: job.title.clone(),
+        job_type: map_marketplace_job_type(&job),
+        status: JobStatus::Running,
+        progress: initial_progress_for_state(&runner_response.job.state),
+        started_at: Some(started_at.clone()),
+        estimated_completion_at: Some(estimated_completion_at),
+        earnings: money(
+            f64::from(job.provider_payout_cents.unwrap_or_else(|| job.budget_cents.unwrap_or(0) * 80 / 100))
+                / 100.0,
+        ),
+        cpu_usage: clamp(runtime.settings.cpu_limit * 0.72, 18.0, runtime.settings.cpu_limit),
+        memory_usage: 48.0,
+        logs: build_ui_logs(&runner_response.job.logs.stdout, &runner_response.job.logs.stderr),
+        execution_output: None,
+        execution_error: None,
+    };
+
+    runtime.active_execution = Some(ActiveExecution {
+        remote_job_id: job.id.clone(),
+        runner_job_id: runner_response.job.id.clone(),
+        last_stdout_len: runner_response.job.logs.stdout.len(),
+        last_stderr_len: runner_response.job.logs.stderr.len(),
+        last_state: runner_response.job.state.clone(),
+    });
+    runtime.active_job = Some(ui_job.clone());
+    runtime.machine.status = WorkerStatus::Busy;
+    runtime.note_network_recovery();
+
+    let assign_log = runtime.push_log(
+        LogLevel::Success,
+        &format!(
+            "Backend assigned {}. Docker runner accepted job {} for execution.",
+            job.title, runner_response.job.id
+        ),
+    );
+    let progress_log = runtime.push_log(
+        LogLevel::Info,
+        &format!(
+            "Job {} is running in Docker image {}.",
+            assignment.job_id, runner_response.job.image
+        ),
+    );
+
+    Ok(vec![
+        RuntimeEvent::StatusChanged(WorkerStatusChangedEvent {
+            event_type: "worker_status_changed",
+            status: WorkerStatus::Busy,
+            last_heartbeat_at: runtime.machine.last_heartbeat_at.clone(),
+            uptime_seconds: runtime.machine.uptime_seconds,
+        }),
+        RuntimeEvent::JobAssigned(JobAssignedEvent {
+            event_type: "job_assigned",
+            job: ui_job.clone(),
+        }),
+        RuntimeEvent::JobProgress(JobProgressEvent {
+            event_type: "job_progress",
+            job: ui_job,
+        }),
+        RuntimeEvent::LogEmitted(ActivityLogEvent {
+            event_type: "log_emitted",
+            log: assign_log,
+            job_id: Some(job.id.clone()),
+        }),
+        RuntimeEvent::LogEmitted(ActivityLogEvent {
+            event_type: "log_emitted",
+            log: progress_log,
+            job_id: Some(assignment.id),
+        }),
+    ])
+}
+
+fn sync_active_execution(
+    http: &Client,
+    runtime: &mut WorkerRuntime,
+    execution: ActiveExecution,
+) -> Result<Vec<RuntimeEvent>, String> {
+    let runner_response: RunnerJobResponse = get_json(
+        http,
+        &format!("{}/jobs/{}", runtime.runner_url, execution.runner_job_id),
+        HeaderMap::new(),
+    )?;
+    let session = runtime
+        .provider_session
+        .clone()
+        .ok_or_else(|| "worker lost provider session during execution".to_string())?;
+
+    let runner_job = runner_response.job;
+    let stdout_delta = slice_delta(&runner_job.logs.stdout, execution.last_stdout_len);
+    let stderr_delta = slice_delta(&runner_job.logs.stderr, execution.last_stderr_len);
+
+    if let Some(active_job) = runtime.active_job.as_mut() {
+        active_job.progress = progress_for_runner_state(&runner_job.state, active_job.progress);
+        active_job.logs = build_ui_logs(&runner_job.logs.stdout, &runner_job.logs.stderr);
+        active_job.cpu_usage = clamp(runtime.settings.cpu_limit * 0.78, 18.0, runtime.settings.cpu_limit);
+        active_job.memory_usage = 50.0;
+        active_job.execution_output = (!runner_job.logs.stdout.trim().is_empty())
+            .then(|| limit_output(&runner_job.logs.stdout));
+        active_job.execution_error = (!runner_job.logs.stderr.trim().is_empty())
+            .then(|| limit_output(&runner_job.logs.stderr));
+    }
+
+    let progress_message = build_progress_message(&runner_job, &stdout_delta, &stderr_delta);
+    if progress_message.as_deref().is_some() || execution.last_state != runner_job.state {
+        let message = progress_message.unwrap_or_else(|| format!("Runner state changed to {}", runner_job.state));
+        let _: Value = post_json(
+            http,
+            &format!("{}/api/jobs/{}/progress", runtime.api_url, execution.remote_job_id),
+            auth_headers(&session)?,
+            &json!({
+                "providerId": session.provider_id,
+                "message": limit_output(&message)
+            }),
+        )?;
+    }
+
+    if let Some(active_execution) = runtime.active_execution.as_mut() {
+        active_execution.last_stdout_len = runner_job.logs.stdout.len();
+        active_execution.last_stderr_len = runner_job.logs.stderr.len();
+        active_execution.last_state = runner_job.state.clone();
+    }
+
+    let Some(active_job) = runtime.active_job.clone() else {
+        return Ok(vec![]);
+    };
+
+    let mut events = Vec::new();
+    if !stdout_delta.is_empty() {
+        let log = runtime.push_log(
+            LogLevel::Info,
+            &format!("stdout {}: {}", execution.remote_job_id, limit_output(&stdout_delta)),
+        );
+        events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
+            event_type: "log_emitted",
+            log,
+            job_id: Some(execution.remote_job_id.clone()),
+        }));
+    }
+    if !stderr_delta.is_empty() {
+        let log = runtime.push_log(
+            LogLevel::Warning,
+            &format!("stderr {}: {}", execution.remote_job_id, limit_output(&stderr_delta)),
+        );
+        events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
+            event_type: "log_emitted",
+            log,
+            job_id: Some(execution.remote_job_id.clone()),
+        }));
+    }
+
+    if is_terminal_state(&runner_job.state) {
+        if is_successful_runner_completion(&runner_job) {
+            let result = serialize_completion_result(runtime, &runner_job);
+            let remote_response: RemoteCompletionResponse = post_json(
+                http,
+                &format!("{}/api/jobs/{}/complete", runtime.api_url, execution.remote_job_id),
+                auth_headers(&session)?,
+                &json!({
+                    "providerId": session.provider_id,
+                    "result": result,
+                    "message": format!(
+                        "Docker runner completed Python execution with exit code {}",
+                        runner_job
+                            .result
+                            .as_ref()
+                            .and_then(|result| result.exit_code)
+                            .unwrap_or(0)
+                    )
+                }),
+            )?;
+
+            let mut completed_job = active_job.clone();
+            completed_job.status = JobStatus::Completed;
+            completed_job.progress = 100.0;
+            completed_job.earnings = money(
+                f64::from(
+                    remote_response
+                        .job
+                        .provider_payout_cents
+                        .unwrap_or_else(|| cents_from_dollars(active_job.earnings)),
+                ) / 100.0,
+            );
+            completed_job.execution_output = Some(limit_output(
+                &runner_job
+                    .result
+                    .as_ref()
+                    .map(|result| result.logs.stdout.clone())
+                    .unwrap_or_else(|| runner_job.logs.stdout.clone()),
+            ));
+            completed_job.execution_error = runner_job
+                .result
+                .as_ref()
+                .and_then(|result| result.error.clone());
+
+            runtime.active_execution = None;
+            runtime.active_job = None;
+            runtime.machine.status = if runtime.pause_requested {
+                WorkerStatus::Paused
+            } else {
+                WorkerStatus::Idle
+            };
+            runtime.recent_jobs.insert(0, completed_job.clone());
+            runtime.recent_jobs.truncate(8);
+            runtime.earnings.lifetime = money(runtime.earnings.lifetime + completed_job.earnings);
+            runtime.earnings.pending = money(runtime.earnings.pending + completed_job.earnings);
+            runtime.earnings.today = money(runtime.earnings.today + completed_job.earnings);
+            runtime.earnings.completed_jobs += 1;
+            if let Some(point) = runtime.earnings.history.last_mut() {
+                point.amount = money(point.amount + completed_job.earnings);
+            }
+            let log = runtime.push_log(
+                LogLevel::Success,
+                &format!(
+                    "{} completed in Docker. exitCode={}, earned ${:.2}.",
+                    completed_job.name,
+                    runner_job
+                        .result
+                        .as_ref()
+                        .and_then(|result| result.exit_code)
+                        .unwrap_or(0),
+                    completed_job.earnings
+                ),
+            );
+            events.push(RuntimeEvent::EarningsUpdated(EarningsUpdateEvent {
+                event_type: "earnings_updated",
+                earnings: runtime.earnings.clone(),
+            }));
+            events.push(RuntimeEvent::StatusChanged(WorkerStatusChangedEvent {
+                event_type: "worker_status_changed",
+                status: runtime.machine.status.clone(),
+                last_heartbeat_at: runtime.machine.last_heartbeat_at.clone(),
+                uptime_seconds: runtime.machine.uptime_seconds,
+            }));
+            events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
+                event_type: "log_emitted",
+                log,
+                job_id: Some(execution.remote_job_id.clone()),
+            }));
+            events.push(RuntimeEvent::JobCompleted(JobCompletedEvent {
+                event_type: "job_completed",
+                job: completed_job,
+                recent_jobs: runtime.recent_jobs.clone(),
+            }));
+            return Ok(events);
+        }
+
+        let failure = runner_failure_message(&runner_job);
+        let _: Value = post_json(
+            http,
+            &format!("{}/api/jobs/{}/fail", runtime.api_url, execution.remote_job_id),
+            auth_headers(&session)?,
+            &json!({
+                "providerId": session.provider_id,
+                "error": limit_output(&failure),
+                "message": "Docker runner failed Python execution"
+            }),
+        )?;
+
+        let mut failed_job = active_job.clone();
+        failed_job.status = JobStatus::Failed;
+        failed_job.progress = 100.0;
+        failed_job.execution_error = Some(limit_output(&failure));
+
+        runtime.active_execution = None;
+        runtime.active_job = None;
+        runtime.machine.status = if runtime.pause_requested {
+            WorkerStatus::Paused
+        } else {
+            WorkerStatus::Idle
+        };
+        runtime.recent_jobs.insert(0, failed_job.clone());
+        runtime.recent_jobs.truncate(8);
+        let log = runtime.push_log(
+            LogLevel::Error,
+            &format!("{} failed in Docker: {}.", failed_job.name, limit_output(&failure)),
+        );
+        events.push(RuntimeEvent::StatusChanged(WorkerStatusChangedEvent {
+            event_type: "worker_status_changed",
+            status: runtime.machine.status.clone(),
+            last_heartbeat_at: runtime.machine.last_heartbeat_at.clone(),
+            uptime_seconds: runtime.machine.uptime_seconds,
+        }));
+        events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
+            event_type: "log_emitted",
+            log,
+            job_id: Some(execution.remote_job_id.clone()),
+        }));
+        events.push(RuntimeEvent::JobCompleted(JobCompletedEvent {
+            event_type: "job_completed",
+            job: failed_job,
+            recent_jobs: runtime.recent_jobs.clone(),
+        }));
+        return Ok(events);
+    }
+
+    events.push(RuntimeEvent::JobProgress(JobProgressEvent {
+        event_type: "job_progress",
+        job: active_job,
+    }));
+    Ok(events)
+}
+
+fn cancel_remote_execution(
+    http: &Client,
+    runtime: &mut WorkerRuntime,
+    reason: &str,
+) -> Option<String> {
+    let execution = runtime.active_execution.clone()?;
+    let session = runtime.provider_session.clone()?;
+
+    let runner_cancel_result: Result<Value, String> = post_json(
+        http,
+        &format!("{}/jobs/{}/cancel", runtime.runner_url, execution.runner_job_id),
+        runner_headers().unwrap_or_else(|_| HeaderMap::new()),
+        &json!({}),
+    );
+
+    let backend_fail_result: Result<Value, String> = post_json(
+        http,
+        &format!("{}/api/jobs/{}/fail", runtime.api_url, execution.remote_job_id),
+        auth_headers(&session).unwrap_or_else(|_| HeaderMap::new()),
+        &json!({
+            "providerId": session.provider_id,
+            "error": reason,
+            "message": reason
+        }),
+    );
+
+    runtime.active_execution = None;
+    runtime.active_job = None;
+
+    match (runner_cancel_result, backend_fail_result) {
+        (Ok(_), Ok(_)) => None,
+        (runner, backend) => Some(format!(
+            "runner cancel: {}; backend fail: {}",
+            runner.err().unwrap_or_else(|| "ok".to_string()),
+            backend.err().unwrap_or_else(|| "ok".to_string())
+        )),
+    }
+}
+
+fn serialize_completion_result(runtime: &WorkerRuntime, runner_job: &RunnerJobRecord) -> String {
+    let payload = json!({
+        "providerMachine": runtime.machine.name,
+        "runnerJobId": runner_job.id,
+        "runnerState": runner_job.state,
+        "runnerType": runner_job.job_type,
+        "exitCode": runner_job.result.as_ref().and_then(|result| result.exit_code),
+        "durationMs": runner_job.result.as_ref().map(|result| result.duration_ms),
+        "startTime": runner_job.result.as_ref().map(|result| result.start_time.clone()),
+        "endTime": runner_job.result.as_ref().map(|result| result.end_time.clone()),
+        "stdout": runner_job
+            .result
+            .as_ref()
+            .map(|result| result.logs.stdout.clone())
+            .unwrap_or_else(|| runner_job.logs.stdout.clone()),
+        "stderr": runner_job
+            .result
+            .as_ref()
+            .map(|result| result.logs.stderr.clone())
+            .unwrap_or_else(|| runner_job.logs.stderr.clone()),
+        "artifacts": runner_job
+            .result
+            .as_ref()
+            .map(|result| result.artifact_paths.clone())
+            .unwrap_or_default(),
+        "truncated": runner_job.logs.truncated,
+        "error": runner_job.result.as_ref().and_then(|result| result.error.clone())
+    });
+
+    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string())
+}
+
+fn runner_request_for_marketplace_job(job: &RemoteMarketplaceJob) -> RunnerExecuteRequest {
+    if let Some(payload) = job
+        .runner_payload
+        .as_ref()
+        .and_then(parse_runner_payload)
+    {
+        return payload;
+    }
+
+    let safe_input = serde_json::to_string(&job.input).unwrap_or_else(|_| "\"\"".to_string());
+    let safe_title = serde_json::to_string(&job.title).unwrap_or_else(|_| "\"ComputeBNB job\"".to_string());
+    let safe_job_type = serde_json::to_string(&job.job_type).unwrap_or_else(|_| "\"unknown\"".to_string());
+    let script = format!(
+        concat!(
+            "import json\n",
+            "import pathlib\n",
+            "import hashlib\n",
+            "title = {title}\n",
+            "job_type = {job_type}\n",
+            "input_text = {input}\n",
+            "payload = {{\"title\": title, \"type\": job_type, \"input\": input_text}}\n",
+            "print(f'ComputeBNB job: {{title}}')\n",
+            "digest = hashlib.sha256(input_text.encode('utf-8')).hexdigest()[:12]\n",
+            "if job_type == 'embedding':\n",
+            "    result = {{\"embedding\": [round((idx + 1) / 10, 3) for idx in range(3)], \"digest\": digest, \"inputLength\": len(input_text)}}\n",
+            "elif job_type == 'image_caption':\n",
+            "    result = {{\"caption\": f'Caption for {{title}} (digest {{digest}})', \"digest\": digest}}\n",
+            "else:\n",
+            "    result = {{\"output\": f'Executed {{job_type}} for {{title}}', \"digest\": digest, \"input\": input_text}}\n",
+            "pathlib.Path('/workspace/artifacts').mkdir(exist_ok=True)\n",
+            "pathlib.Path('/workspace/artifacts/result.json').write_text(json.dumps(result, indent=2), encoding='utf-8')\n",
+            "print(json.dumps(result))\n"
+        ),
+        title = safe_title,
+        job_type = safe_job_type,
+        input = safe_input,
+    );
+
+    RunnerExecuteRequest {
+        id: Some(job.id.clone()),
+        job_type: "python_script".to_string(),
+        image: Some("computebnb/python-runner:local".to_string()),
+        command: None,
+        script: Some(script),
+        input: Some(json!({
+            "jobId": job.id,
+            "title": job.title,
+            "jobType": job.job_type,
+            "input": job.input
+        })),
+        limits: Some(RunnerExecuteLimits {
+            timeout_ms: 30_000,
+            cpus: 1.0,
+            memory_mb: 512,
+            pids_limit: 128,
+            log_limit_bytes: 64 * 1024,
+        }),
+    }
+}
+
+fn parse_runner_payload(value: &Value) -> Option<RunnerExecuteRequest> {
+    serde_json::from_value::<RunnerExecuteRequest>(value.clone()).ok()
+}
+
+fn map_marketplace_job_type(job: &RemoteMarketplaceJob) -> JobType {
+    if let Some(payload_type) = job
+        .runner_payload
+        .as_ref()
+        .and_then(|payload| payload.get("type"))
+        .and_then(Value::as_str)
+    {
+        return match payload_type {
+            "inference" => JobType::BatchInference,
+            "benchmark_demo" => JobType::Simulation,
+            "python_script" => JobType::Compile,
+            _ => JobType::Compile,
+        };
+    }
+
+    match job.job_type.as_str() {
+        "embedding" | "image_caption" => JobType::BatchInference,
+        "shell_demo" => JobType::Compile,
+        "text_generation" => JobType::Simulation,
+        _ => JobType::Compile,
+    }
+}
+
+fn build_progress_message(
+    runner_job: &RunnerJobRecord,
+    stdout_delta: &str,
+    stderr_delta: &str,
+) -> Option<String> {
+    if !stderr_delta.trim().is_empty() {
+        return Some(format!("stderr: {}", limit_output(stderr_delta)));
+    }
+
+    if !stdout_delta.trim().is_empty() {
+        return Some(format!("stdout: {}", limit_output(stdout_delta)));
+    }
+
+    if runner_job.state == "pulling_image" {
+        return Some("Pulling approved Docker image for execution".to_string());
+    }
+
+    if runner_job.state == "running" {
+        return Some("Python job is running inside Docker".to_string());
+    }
+
+    None
+}
+
+fn build_ui_logs(stdout: &str, stderr: &str) -> Vec<JobLog> {
+    let mut logs = Vec::new();
+
+    for line in stderr.lines().rev().take(6) {
+        if !line.trim().is_empty() {
+            logs.push(log_with_text(LogLevel::Error, line));
+        }
+    }
+    for line in stdout.lines().rev().take(6) {
+        if !line.trim().is_empty() {
+            logs.push(log_with_text(LogLevel::Info, line));
+        }
+    }
+
+    logs.truncate(12);
+    logs
+}
+
+fn initial_progress_for_state(state: &str) -> f64 {
+    match state {
+        "queued" => 5.0,
+        "pulling_image" => 12.0,
+        "running" => 25.0,
+        _ => 10.0,
+    }
+}
+
+fn progress_for_runner_state(state: &str, current: f64) -> f64 {
+    match state {
+        "queued" => current.max(5.0),
+        "pulling_image" => current.max(18.0),
+        "running" => (current + 18.0).min(92.0),
+        "completed" | "failed" | "timed_out" => 100.0,
+        _ => current,
+    }
+}
+
+fn is_terminal_state(state: &str) -> bool {
+    matches!(state, "completed" | "failed" | "timed_out")
+}
+
+fn is_successful_runner_completion(job: &RunnerJobRecord) -> bool {
+    job.state == "completed"
+        && job
+            .result
+            .as_ref()
+            .and_then(|result| result.exit_code)
+            .unwrap_or(1)
+            == 0
+        && job.result.as_ref().and_then(|result| result.error.clone()).is_none()
+}
+
+fn runner_failure_message(job: &RunnerJobRecord) -> String {
+    job.result
+        .as_ref()
+        .and_then(|result| result.error.clone())
+        .or_else(|| job.error.clone())
+        .or_else(|| {
+            job.result.as_ref().map(|result| {
+                format!(
+                    "Runner ended in {} with exit code {:?}. stderr={}",
+                    job.state,
+                    result.exit_code,
+                    limit_output(&result.logs.stderr)
+                )
+            })
+        })
+        .unwrap_or_else(|| {
+            format!(
+                "Runner ended in {}. stderr={}",
+                job.state,
+                limit_output(&job.logs.stderr)
+            )
+        })
+}
+
+fn post_json<T: DeserializeOwned, B: Serialize>(
+    http: &Client,
+    url: &str,
+    headers: HeaderMap,
+    body: &B,
+) -> Result<T, String> {
+    let response = http
+        .post(url)
+        .headers(headers)
+        .json(body)
+        .send()
+        .map_err(|error| format!("POST {url} failed: {error}"))?;
+
+    parse_json_response(response, url)
+}
+
+fn get_json<T: DeserializeOwned>(
+    http: &Client,
+    url: &str,
+    headers: HeaderMap,
+) -> Result<T, String> {
+    let response = http
+        .get(url)
+        .headers(headers)
+        .send()
+        .map_err(|error| format!("GET {url} failed: {error}"))?;
+
+    parse_json_response(response, url)
+}
+
+fn parse_json_response<T: DeserializeOwned>(
+    response: reqwest::blocking::Response,
+    url: &str,
+) -> Result<T, String> {
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|error| format!("Unable to read response from {url}: {error}"))?;
+
+    if !status.is_success() {
+        return Err(format!(
+            "{} returned {}: {}",
+            url,
+            status,
+            limit_output(&body)
+        ));
+    }
+
+    serde_json::from_str(&body)
+        .map_err(|error| format!("Unable to decode JSON from {url}: {error}; body={}", limit_output(&body)))
+}
+
+fn auth_headers(session: &ProviderSession) -> Result<HeaderMap, String> {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", session.provider_token))
+            .map_err(|error| format!("invalid provider token header: {error}"))?,
+    );
+    Ok(headers)
+}
+
+fn runner_headers() -> Result<HeaderMap, String> {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    Ok(headers)
 }
 
 fn seed_recent_jobs() -> Vec<Job> {
@@ -1291,147 +2214,6 @@ fn completed_job(
     }
 }
 
-struct ScriptExecution {
-    summary: String,
-    duration_ms: u128,
-}
-
-fn execute_demo_script(
-    job_id: &str,
-    job_name: &str,
-    job_type: &JobType,
-) -> Result<ScriptExecution, String> {
-    let started = Instant::now();
-    let workspace = std::env::temp_dir().join(format!(
-        "computebnb-{}-{}",
-        sanitize_id(job_id),
-        Utc::now().timestamp_millis()
-    ));
-    fs::create_dir_all(&workspace)
-        .map_err(|error| format!("unable to create sandbox workspace: {error}"))?;
-
-    let script_name = if cfg!(windows) { "job.cmd" } else { "job.sh" };
-    let script_path = workspace.join(script_name);
-    let script = script_for_job(job_type);
-    fs::write(&script_path, script).map_err(|error| format!("unable to write script: {error}"))?;
-
-    let mut input = fs::File::create(workspace.join("input.txt"))
-        .map_err(|error| format!("unable to write input artifact: {error}"))?;
-    writeln!(input, "job_id={job_id}")
-        .map_err(|error| format!("unable to write input artifact: {error}"))?;
-    writeln!(input, "job_name={job_name}")
-        .map_err(|error| format!("unable to write input artifact: {error}"))?;
-    writeln!(input, "job_type={}", job_type_label(job_type))
-        .map_err(|error| format!("unable to write input artifact: {error}"))?;
-
-    let mut command = if cfg!(windows) {
-        let mut command = Command::new("cmd.exe");
-        command.arg("/C").arg(&script_path);
-        command
-    } else {
-        let mut command = Command::new("/bin/sh");
-        command.arg(&script_path);
-        command
-    };
-
-    let mut child = command
-        .current_dir(&workspace)
-        .env_clear()
-        .env("COMPUTEBNB_JOB_ID", job_id)
-        .env("COMPUTEBNB_JOB_NAME", job_name)
-        .env("COMPUTEBNB_JOB_TYPE", job_type_label(job_type))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("unable to spawn executor: {error}"))?;
-
-    let timeout = Duration::from_secs(4);
-    loop {
-        if child
-            .try_wait()
-            .map_err(|error| format!("executor wait failed: {error}"))?
-            .is_some()
-        {
-            let output = child
-                .wait_with_output()
-                .map_err(|error| format!("unable to read executor output: {error}"))?;
-            let _ = fs::remove_dir_all(&workspace);
-            if output.status.success() {
-                let stdout = limit_output(&String::from_utf8_lossy(&output.stdout));
-                let summary = if stdout.is_empty() {
-                    "script completed without stdout".to_string()
-                } else {
-                    stdout
-                };
-                return Ok(ScriptExecution {
-                    summary,
-                    duration_ms: started.elapsed().as_millis(),
-                });
-            }
-
-            let stderr = limit_output(&String::from_utf8_lossy(&output.stderr));
-            let message = if stderr.is_empty() {
-                format!("script exited with {}", output.status)
-            } else {
-                format!("script exited with {}: {}", output.status, stderr)
-            };
-            return Err(message);
-        }
-
-        if started.elapsed() > timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = fs::remove_dir_all(&workspace);
-            return Err(format!("script timed out after {}ms", timeout.as_millis()));
-        }
-
-        std::thread::sleep(Duration::from_millis(25));
-    }
-}
-
-fn script_for_job(job_type: &JobType) -> &'static str {
-    if cfg!(windows) {
-        match job_type {
-            JobType::Render => "@echo off\r\nsetlocal\r\nset /a total=0\r\nfor /l %%i in (1,1,1200) do set /a total+=%%i%%97\r\necho render complete checksum=%total%\r\n",
-            JobType::Simulation => "@echo off\r\nsetlocal\r\nset /a total=0\r\nfor /l %%i in (1,1,1500) do set /a total+=%%i%%89\r\necho simulation complete checksum=%total%\r\n",
-            JobType::BatchInference => "@echo off\r\nsetlocal\r\nset /a total=0\r\nfor /l %%i in (1,1,1000) do set /a total+=%%i%%41\r\necho batch-inference complete rows=1000 checksum=%total%\r\n",
-            JobType::Compile => "@echo off\r\nsetlocal\r\nset /a total=0\r\nfor /l %%i in (1,1,900) do set /a total+=%%i%%53\r\necho compile complete units=900 checksum=%total%\r\n",
-            JobType::DataCleaning => "@echo off\r\nsetlocal\r\nset /a total=0\r\nfor /l %%i in (1,1,700) do set /a total+=%%i%%31\r\necho data-cleaning complete records=700 checksum=%total%\r\n",
-        }
-    } else {
-        match job_type {
-            JobType::Render => "set -eu\numask 077\ntotal=0\ni=1\nwhile [ \"$i\" -le 1200 ]; do total=$((total + i % 97)); i=$((i + 1)); done\nprintf 'render complete checksum=%s\\n' \"$total\"\n",
-            JobType::Simulation => "set -eu\numask 077\ntotal=0\ni=1\nwhile [ \"$i\" -le 1500 ]; do total=$((total + i % 89)); i=$((i + 1)); done\nprintf 'simulation complete checksum=%s\\n' \"$total\"\n",
-            JobType::BatchInference => "set -eu\numask 077\ntotal=0\ni=1\nwhile [ \"$i\" -le 1000 ]; do total=$((total + i % 41)); i=$((i + 1)); done\nprintf 'batch-inference complete rows=1000 checksum=%s\\n' \"$total\"\n",
-            JobType::Compile => "set -eu\numask 077\ntotal=0\ni=1\nwhile [ \"$i\" -le 900 ]; do total=$((total + i % 53)); i=$((i + 1)); done\nprintf 'compile complete units=900 checksum=%s\\n' \"$total\"\n",
-            JobType::DataCleaning => "set -eu\numask 077\ntotal=0\ni=1\nwhile [ \"$i\" -le 700 ]; do total=$((total + i % 31)); i=$((i + 1)); done\nprintf 'data-cleaning complete records=700 checksum=%s\\n' \"$total\"\n",
-        }
-    }
-}
-
-fn job_type_label(job_type: &JobType) -> &'static str {
-    match job_type {
-        JobType::Render => "render",
-        JobType::Simulation => "simulation",
-        JobType::BatchInference => "batch-inference",
-        JobType::Compile => "compile",
-        JobType::DataCleaning => "data-cleaning",
-    }
-}
-
-fn sanitize_id(value: &str) -> String {
-    value
-        .chars()
-        .filter(|item| item.is_ascii_alphanumeric() || *item == '-')
-        .collect()
-}
-
-fn limit_output(value: &str) -> String {
-    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    normalized.chars().take(700).collect()
-}
-
 fn worker_runner_dir() -> Result<PathBuf, String> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let repo_root = manifest_dir
@@ -1446,6 +2228,37 @@ fn worker_runner_dir() -> Result<PathBuf, String> {
             worker_dir.to_string_lossy()
         ))
     }
+}
+
+fn repo_root() -> Option<PathBuf> {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().map(PathBuf::from)
+}
+
+fn repo_env(name: &str) -> Option<String> {
+    if let Ok(value) = std::env::var(name) {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    let root = repo_root()?;
+    let env_path = root.join(".env");
+    let contents = fs::read_to_string(env_path).ok()?;
+
+    contents.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            return None;
+        }
+        let (key, value) = trimmed.split_once('=')?;
+        if key.trim() != name {
+            return None;
+        }
+
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        (!value.is_empty()).then(|| value.to_string())
+    })
 }
 
 fn spawn_shell(command: &str, cwd: Option<PathBuf>) -> Result<Child, String> {
@@ -1495,6 +2308,14 @@ fn shell_command(command: &str) -> Command {
     }
 }
 
+fn parse_host_port(url: &str) -> Option<(String, u16)> {
+    let host_port = url.split('/').next()?.trim();
+    let mut pieces = host_port.split(':');
+    let host = pieces.next()?.to_string();
+    let port = pieces.next()?.parse::<u16>().ok()?;
+    Some((host, port))
+}
+
 fn local_machine_name() -> String {
     std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
@@ -1517,6 +2338,14 @@ fn log(id: &str, level: LogLevel, message: &str) -> JobLog {
         level,
         message: message.to_string(),
     }
+}
+
+fn log_with_text(level: LogLevel, message: &str) -> JobLog {
+    log(
+        &format!("log-{}", Utc::now().timestamp_millis()),
+        level,
+        message,
+    )
 }
 
 fn log_with_random_id(seed: &mut u64, level: LogLevel, message: &str) -> JobLog {
@@ -1545,16 +2374,50 @@ fn money(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
 }
 
+fn cents_from_dollars(value: f64) -> u32 {
+    (value * 100.0).round().max(0.0) as u32
+}
+
+fn slice_delta<'a>(value: &'a str, from: usize) -> &'a str {
+    if from >= value.len() {
+        ""
+    } else {
+        &value[from..]
+    }
+}
+
+fn limit_output(value: &str) -> String {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    normalized.chars().take(2000).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn demo_script_executor_captures_stdout() {
-        let result = execute_demo_script("job-test", "Executor test", &JobType::Compile)
-            .expect("demo script should execute");
+    fn fallback_marketplace_job_becomes_python_script() {
+        let job = RemoteMarketplaceJob {
+            id: "job-1".to_string(),
+            title: "Hello".to_string(),
+            job_type: "shell_demo".to_string(),
+            input: "print hello".to_string(),
+            runner_payload: None,
+            budget_cents: Some(500),
+            provider_payout_cents: None,
+        };
 
-        assert!(result.summary.contains("compile complete"));
-        assert!(result.summary.contains("checksum="));
+        let request = runner_request_for_marketplace_job(&job);
+
+        assert_eq!(request.job_type, "python_script");
+        assert!(request.script.unwrap_or_default().contains("ComputeBNB job"));
+    }
+
+    #[test]
+    fn terminal_runner_states_map_to_completion() {
+        assert!(is_terminal_state("completed"));
+        assert!(is_terminal_state("failed"));
+        assert!(is_terminal_state("timed_out"));
+        assert!(!is_terminal_state("running"));
     }
 }

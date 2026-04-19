@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import dbConnect from "@/lib/db";
 import { calculateSuccessRate, formatProvider, getDbUnavailablePayload } from "@/lib/marketplace";
-import { Provider } from "@/lib/models";
+import { Machine } from "@/lib/models";
 import { createProviderToken, hashProviderToken } from "@/lib/provider-auth";
 
 const schema = z.object({
@@ -20,9 +20,9 @@ export async function POST(request: Request) {
     const token = createProviderToken();
     const tokenHash = hashProviderToken(token);
 
-    const provider = await Provider.create({
+    const machine = await Machine.create({
       name: input.name,
-      capabilities: input.capabilities ?? ["cpu", "node"],
+      capabilities: input.capabilities ?? ["python", "cpu"],
       hourlyRateCents: input.hourlyRateCents ?? 250,
       status: "online",
       lastHeartbeatAt: new Date(),
@@ -30,13 +30,19 @@ export async function POST(request: Request) {
       tokenHash
     });
 
+    const payload = {
+      ...formatProvider(machine),
+      token
+    };
+
     return NextResponse.json({
-      provider: {
-        ...formatProvider(provider),
-        token
-      }
+      provider: payload,
+      machine: payload,
     });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return NextResponse.json({ error: "Invalid machine payload", issues: error.issues }, { status: 400 });
+    }
     if (error instanceof Error && error.message.includes("MONGODB_URI")) {
       return NextResponse.json(getDbUnavailablePayload(), { status: 503 });
     }

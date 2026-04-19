@@ -4,6 +4,7 @@ import { ActivityLogPanel } from "@/src/components/worker/activity-log-panel";
 import { ActiveJobCard } from "@/src/components/worker/active-job-card";
 import { AppShell } from "@/src/components/worker/app-shell";
 import { EarningsCard } from "@/src/components/worker/earnings-card";
+import { LatestOutputCard } from "@/src/components/worker/latest-output-card";
 import { MachineOverviewCard } from "@/src/components/worker/machine-overview-card";
 import { RecentJobsTable } from "@/src/components/worker/recent-jobs-table";
 import { ResourceUsageCard } from "@/src/components/worker/resource-usage-card";
@@ -20,6 +21,7 @@ export default function ProviderDashboardPage() {
         <div className="space-y-5">
           <MachineOverviewCard state={state} onStart={startWorker} onStop={stopWorker} onPause={pauseWorker} />
           <ActiveJobCard job={state.activeJob} workerStatus={state.machine.status} onPause={pauseWorker} onResume={resumeWorker} />
+          <LatestOutputCard latestOutput={state.latestOutput} />
           <ResourceUsageCard state={state} />
           <RecentJobsTable jobs={state.recentJobs} />
         </div>

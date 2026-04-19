@@ -9,7 +9,7 @@ export function ResourceUsageCard({ state }: { state: WorkerState }) {
     <section className="rounded-lg border border-white/10 bg-white/[0.055] p-5 shadow-[0_24px_80px_rgba(0,0,0,0.2)]">
       <div className="mb-4">
         <p className="text-xs font-semibold uppercase tracking-[0.24em] text-emerald-200">Machine health</p>
-        <h2 className="mt-2 text-xl font-semibold text-white">Resource envelope</h2>
+        <h2 className="mt-2 text-xl font-semibold text-white">Single-machine envelope</h2>
       </div>
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
         <MetricTile icon={Cpu} label="CPU" value={`${state.metrics.cpuUsage.toFixed(0)}%`} detail={`${state.machine.cpuLimit}% owner cap`} progress={state.metrics.cpuUsage} />

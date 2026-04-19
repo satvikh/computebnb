@@ -1,238 +1,335 @@
 /**
- * scripts/seed.ts
- *
- * Populate the gpubnb database with realistic demo data.
+ * Populate the gpubnb database with simplified MVP demo data.
  * Run with: npx tsx --env-file=.env scripts/seed.ts
  */
 import mongoose from "mongoose";
 
 const MONGODB_URI = process.env.MONGODB_URI;
 if (!MONGODB_URI) {
-  console.error("❌ MONGODB_URI not set");
+  console.error("MONGODB_URI not set");
   process.exit(1);
+}
+
+function successRate(completedJobs: number, failedJobs: number) {
+  const total = completedJobs + failedJobs;
+  if (total === 0) return 100;
+  return Number(((completedJobs / total) * 100).toFixed(1));
 }
 
 async function seed() {
   await mongoose.connect(MONGODB_URI!, {
     dbName: process.env.MONGODB_DB_NAME ?? "gpubnb",
   });
-  console.log("✅ Connected to MongoDB");
 
-  const db = mongoose.connection.db!;
+  const db = mongoose.connection.db;
+  if (!db) {
+    throw new Error("Mongo connection missing database handle");
+  }
 
-  // Clear existing data
-  await Promise.all([
-    db.collection("providers").deleteMany({}),
-    db.collection("jobs").deleteMany({}),
-    db.collection("assignments").deleteMany({}),
-    db.collection("jobevents").deleteMany({}),
-  ]);
-  console.log("🗑️  Cleared existing data");
+  await db.dropDatabase();
 
-  // --- Providers ---
-  const providers = await db.collection("providers").insertMany([
+  const now = Date.now();
+  const machines = await db.collection("machines").insertMany([
     {
       name: "MacBook Pro M2",
       status: "online",
-      capabilities: ["cpu", "node", "lightweight-ai"],
+      capabilities: ["python", "cpu", "local-shell"],
       hourlyRateCents: 300,
-      totalEarnedCents: 2240,
-      completedJobs: 4,
+      totalEarnedCents: 760,
+      completedJobs: 2,
       failedJobs: 0,
-      successRate: 100,
+      successRate: successRate(2, 0),
       trustScore: 98,
-      lastHeartbeatAt: new Date(),
-      createdAt: new Date(Date.now() - 86400000 * 3),
-      updatedAt: new Date(),
+      lastHeartbeatAt: new Date(now - 5_000),
+      createdAt: new Date(now - 3 * 86_400_000),
+      updatedAt: new Date(now - 5_000),
     },
     {
       name: "Dell XPS Desktop",
-      status: "online",
-      capabilities: ["cpu", "node", "gpu-lite"],
+      status: "busy",
+      capabilities: ["python", "cpu", "batch"],
       hourlyRateCents: 450,
-      totalEarnedCents: 1600,
-      completedJobs: 3,
+      totalEarnedCents: 960,
+      completedJobs: 2,
       failedJobs: 1,
-      successRate: 75,
-      trustScore: 82,
-      lastHeartbeatAt: new Date(),
-      createdAt: new Date(Date.now() - 86400000 * 2),
-      updatedAt: new Date(),
+      successRate: successRate(2, 1),
+      trustScore: 84,
+      lastHeartbeatAt: new Date(now - 8_000),
+      createdAt: new Date(now - 2 * 86_400_000),
+      updatedAt: new Date(now - 8_000),
     },
     {
       name: "Raspberry Pi Cluster",
       status: "offline",
-      capabilities: ["cpu", "node"],
-      hourlyRateCents: 100,
-      totalEarnedCents: 400,
+      capabilities: ["python", "cpu"],
+      hourlyRateCents: 120,
+      totalEarnedCents: 180,
       completedJobs: 1,
       failedJobs: 1,
-      successRate: 50,
-      trustScore: 65,
-      lastHeartbeatAt: new Date(Date.now() - 120000), // stale
-      createdAt: new Date(Date.now() - 86400000 * 5),
-      updatedAt: new Date(Date.now() - 120000),
+      successRate: successRate(1, 1),
+      trustScore: 67,
+      lastHeartbeatAt: new Date(now - 240_000),
+      createdAt: new Date(now - 5 * 86_400_000),
+      updatedAt: new Date(now - 240_000),
     },
   ]);
-  const providerIds = Object.values(providers.insertedIds);
-  console.log(`✅ Seeded ${providerIds.length} providers`);
 
-  // --- Jobs ---
-  const now = Date.now();
+  const machineIds = Object.values(machines.insertedIds);
+
   const jobDocs = [
     {
       title: "Summarize launch notes",
-      type: "text_generation",
+      type: "python",
       status: "completed",
-      input: "Summarize these hackathon launch notes into three bullets.",
-      result: "1. GPUbnb connects spare compute with AI workloads.\n2. Workers run a lightweight CLI agent.\n3. Pricing uses an 80/20 split model.",
+      machineId: machineIds[0],
+      source: "notes = ['GPUbnb connects spare compute', 'workers poll by machine', 'jobs store stdout/stderr'];\nprint('\\n'.join(f'- {note}' for note in notes))",
+      stdout:
+        "- GPUbnb connects spare compute\n- workers poll by machine\n- jobs store stdout/stderr",
+      stderr: "",
+      exitCode: 0,
       budgetCents: 700,
+      jobCostCents: 700,
       providerPayoutCents: 560,
       platformFeeCents: 140,
-      assignedProviderId: providerIds[0],
-      retryCount: 0,
-      startedAt: new Date(now - 60000 * 10),
-      completedAt: new Date(now - 60000 * 8),
+      startedAt: new Date(now - 12 * 60_000),
+      completedAt: new Date(now - 10 * 60_000),
       actualRuntimeSeconds: 120,
-      proofHash: "sha256:abc123def456",
-      createdAt: new Date(now - 60000 * 12),
-      updatedAt: new Date(now - 60000 * 8),
+      proofHash: "2c8f7b13f4d1a8a1",
+      createdAt: new Date(now - 13 * 60_000),
+      updatedAt: new Date(now - 10 * 60_000),
     },
     {
-      title: "Caption product image",
-      type: "image_caption",
+      title: "Normalize customer CSV",
+      type: "python",
       status: "completed",
-      input: "Generate a descriptive caption for this product image.",
-      result: "A sleek matte-black wireless mouse sitting on a wooden desk.",
+      machineId: machineIds[1],
+      source: "print('normalized,42')",
+      stdout: "normalized,42",
+      stderr: "",
+      exitCode: 0,
       budgetCents: 500,
+      jobCostCents: 500,
       providerPayoutCents: 400,
       platformFeeCents: 100,
-      assignedProviderId: providerIds[1],
-      retryCount: 0,
-      startedAt: new Date(now - 60000 * 30),
-      completedAt: new Date(now - 60000 * 28),
+      startedAt: new Date(now - 35 * 60_000),
+      completedAt: new Date(now - 33 * 60_000),
       actualRuntimeSeconds: 90,
-      proofHash: "sha256:789ghi012jkl",
-      createdAt: new Date(now - 60000 * 35),
-      updatedAt: new Date(now - 60000 * 28),
+      proofHash: "838d899ecf4b79d4",
+      createdAt: new Date(now - 36 * 60_000),
+      updatedAt: new Date(now - 33 * 60_000),
     },
     {
-      title: "Generate embeddings for FAQ",
-      type: "embedding",
+      title: "Generate FAQ embeddings",
+      type: "python",
       status: "running",
-      input: "Embed our top 20 FAQ entries for semantic search.",
+      machineId: machineIds[1],
+      source: "print('embedding chunk 1/4')",
+      stdout: "embedding chunk 1/4",
+      stderr: "",
+      exitCode: null,
       budgetCents: 1200,
-      assignedProviderId: providerIds[0],
-      retryCount: 0,
-      startedAt: new Date(now - 60000 * 2),
-      createdAt: new Date(now - 60000 * 5),
-      updatedAt: new Date(now - 60000),
+      startedAt: new Date(now - 4 * 60_000),
+      createdAt: new Date(now - 6 * 60_000),
+      updatedAt: new Date(now - 45_000),
     },
     {
       title: "Translate support docs",
-      type: "text_generation",
+      type: "python",
       status: "queued",
-      input: "Translate these support docs into Spanish.",
+      machineId: machineIds[0],
+      source: "print('translate docs to Spanish')",
+      stdout: "",
+      stderr: "",
+      exitCode: null,
       budgetCents: 800,
-      retryCount: 0,
-      createdAt: new Date(now - 60000),
-      updatedAt: new Date(now - 60000),
+      createdAt: new Date(now - 2 * 60_000),
+      updatedAt: new Date(now - 2 * 60_000),
     },
     {
       title: "Analyze sentiment batch",
-      type: "text_generation",
+      type: "python",
       status: "failed",
-      input: "Run sentiment analysis on 500 product reviews.",
+      machineId: machineIds[2],
+      source: "raise MemoryError('batch too large')",
+      stdout: "processed 312 rows",
+      stderr: "MemoryError: batch too large",
+      exitCode: 1,
       budgetCents: 1500,
-      assignedProviderId: providerIds[2],
-      retryCount: 2,
-      startedAt: new Date(now - 60000 * 60),
-      completedAt: new Date(now - 60000 * 55),
-      failureReason: "Worker ran out of memory after processing 312 reviews",
-      error: "OOM: exceeded 512MB limit",
-      createdAt: new Date(now - 60000 * 65),
-      updatedAt: new Date(now - 60000 * 55),
+      startedAt: new Date(now - 68 * 60_000),
+      completedAt: new Date(now - 63 * 60_000),
+      actualRuntimeSeconds: 180,
+      failureReason: "MemoryError: batch too large",
+      error: "MemoryError: batch too large",
+      createdAt: new Date(now - 70 * 60_000),
+      updatedAt: new Date(now - 63 * 60_000),
     },
   ];
 
   const jobs = await db.collection("jobs").insertMany(jobDocs);
   const jobIds = Object.values(jobs.insertedIds);
-  console.log(`✅ Seeded ${jobIds.length} jobs`);
 
-  // --- Assignments ---
-  await db.collection("assignments").insertMany([
+  await db.collection("jobevents").insertMany([
     {
       jobId: jobIds[0],
-      providerId: providerIds[0],
-      status: "completed",
-      startedAt: jobDocs[0].startedAt,
-      completedAt: jobDocs[0].completedAt,
+      machineId: machineIds[0],
+      type: "queued",
+      message: "Job queued for MacBook Pro M2",
       createdAt: jobDocs[0].createdAt,
+      updatedAt: jobDocs[0].createdAt,
+    },
+    {
+      jobId: jobIds[0],
+      machineId: machineIds[0],
+      type: "started",
+      message: "Machine started execution",
+      createdAt: jobDocs[0].startedAt,
+      updatedAt: jobDocs[0].startedAt,
+    },
+    {
+      jobId: jobIds[0],
+      machineId: machineIds[0],
+      type: "completed",
+      message: "Machine completed job",
+      createdAt: jobDocs[0].completedAt,
       updatedAt: jobDocs[0].completedAt,
     },
     {
       jobId: jobIds[1],
-      providerId: providerIds[1],
-      status: "completed",
-      startedAt: jobDocs[1].startedAt,
-      completedAt: jobDocs[1].completedAt,
+      machineId: machineIds[1],
+      type: "queued",
+      message: "Job queued for Dell XPS Desktop",
       createdAt: jobDocs[1].createdAt,
+      updatedAt: jobDocs[1].createdAt,
+    },
+    {
+      jobId: jobIds[1],
+      machineId: machineIds[1],
+      type: "completed",
+      message: "Machine completed job",
+      createdAt: jobDocs[1].completedAt,
       updatedAt: jobDocs[1].completedAt,
     },
     {
       jobId: jobIds[2],
-      providerId: providerIds[0],
-      status: "running",
-      startedAt: jobDocs[2].startedAt,
+      machineId: machineIds[1],
+      type: "queued",
+      message: "Job queued for Dell XPS Desktop",
       createdAt: jobDocs[2].createdAt,
-      updatedAt: jobDocs[2].updatedAt,
+      updatedAt: jobDocs[2].createdAt,
+    },
+    {
+      jobId: jobIds[2],
+      machineId: machineIds[1],
+      type: "progress",
+      message: "Machine reported progress",
+      createdAt: new Date(now - 60_000),
+      updatedAt: new Date(now - 60_000),
+    },
+    {
+      jobId: jobIds[3],
+      machineId: machineIds[0],
+      type: "queued",
+      message: "Job queued for MacBook Pro M2",
+      createdAt: jobDocs[3].createdAt,
+      updatedAt: jobDocs[3].createdAt,
     },
     {
       jobId: jobIds[4],
-      providerId: providerIds[2],
-      status: "failed",
-      startedAt: jobDocs[4].startedAt,
-      completedAt: jobDocs[4].completedAt,
+      machineId: machineIds[2],
+      type: "queued",
+      message: "Job queued for Raspberry Pi Cluster",
       createdAt: jobDocs[4].createdAt,
+      updatedAt: jobDocs[4].createdAt,
+    },
+    {
+      jobId: jobIds[4],
+      machineId: machineIds[2],
+      type: "failed",
+      message: "MemoryError: batch too large",
+      createdAt: jobDocs[4].completedAt,
       updatedAt: jobDocs[4].completedAt,
     },
   ]);
-  console.log("✅ Seeded 4 assignments");
 
-  // --- Job Events ---
-  await db.collection("jobevents").insertMany([
-    // Job 0 lifecycle
-    { jobId: jobIds[0], type: "created", message: "Job queued from web app", createdAt: jobDocs[0].createdAt },
-    { jobId: jobIds[0], providerId: providerIds[0], type: "assigned", message: "Assigned to MacBook Pro M2", createdAt: new Date(jobDocs[0].createdAt!.getTime() + 5000) },
-    { jobId: jobIds[0], providerId: providerIds[0], type: "started", message: "Worker started execution", createdAt: jobDocs[0].startedAt },
-    { jobId: jobIds[0], providerId: providerIds[0], type: "progress", message: "Processing 50%", progressPct: 50, createdAt: new Date(jobDocs[0].startedAt!.getTime() + 60000) },
-    { jobId: jobIds[0], providerId: providerIds[0], type: "completed", message: "Worker completed job", createdAt: jobDocs[0].completedAt },
-    // Job 1 lifecycle
-    { jobId: jobIds[1], type: "created", message: "Job queued from web app", createdAt: jobDocs[1].createdAt },
-    { jobId: jobIds[1], providerId: providerIds[1], type: "assigned", message: "Assigned to Dell XPS Desktop", createdAt: new Date(jobDocs[1].createdAt!.getTime() + 3000) },
-    { jobId: jobIds[1], providerId: providerIds[1], type: "started", message: "Worker started execution", createdAt: jobDocs[1].startedAt },
-    { jobId: jobIds[1], providerId: providerIds[1], type: "completed", message: "Worker completed job", createdAt: jobDocs[1].completedAt },
-    // Job 2 (running)
-    { jobId: jobIds[2], type: "created", message: "Job queued from web app", createdAt: jobDocs[2].createdAt },
-    { jobId: jobIds[2], providerId: providerIds[0], type: "assigned", message: "Assigned to MacBook Pro M2", createdAt: new Date(jobDocs[2].createdAt!.getTime() + 2000) },
-    { jobId: jobIds[2], providerId: providerIds[0], type: "started", message: "Worker started execution", createdAt: jobDocs[2].startedAt },
-    { jobId: jobIds[2], providerId: providerIds[0], type: "progress", message: "Processing embeddings 25%", progressPct: 25, createdAt: new Date(now - 60000) },
-    // Job 3 (queued)
-    { jobId: jobIds[3], type: "created", message: "Job queued from web app", createdAt: jobDocs[3].createdAt },
-    // Job 4 (failed)
-    { jobId: jobIds[4], type: "created", message: "Job queued from web app", createdAt: jobDocs[4].createdAt },
-    { jobId: jobIds[4], providerId: providerIds[2], type: "assigned", message: "Assigned to Raspberry Pi Cluster", createdAt: new Date(jobDocs[4].createdAt!.getTime() + 4000) },
-    { jobId: jobIds[4], providerId: providerIds[2], type: "started", message: "Worker started execution", createdAt: jobDocs[4].startedAt },
-    { jobId: jobIds[4], providerId: providerIds[2], type: "failed", message: "Worker ran out of memory", createdAt: jobDocs[4].completedAt },
+  await db.collection("ledgerentries").insertMany([
+    {
+      jobId: jobIds[0],
+      machineId: machineIds[0],
+      type: "job_charge",
+      amountCents: 700,
+      status: "captured",
+      createdAt: jobDocs[0].completedAt,
+      updatedAt: jobDocs[0].completedAt,
+    },
+    {
+      jobId: jobIds[0],
+      machineId: machineIds[0],
+      type: "provider_payout",
+      amountCents: 560,
+      status: "pending",
+      createdAt: jobDocs[0].completedAt,
+      updatedAt: jobDocs[0].completedAt,
+    },
+    {
+      jobId: jobIds[0],
+      machineId: machineIds[0],
+      type: "platform_fee",
+      amountCents: 140,
+      status: "captured",
+      createdAt: jobDocs[0].completedAt,
+      updatedAt: jobDocs[0].completedAt,
+    },
+    {
+      jobId: jobIds[1],
+      machineId: machineIds[1],
+      type: "job_charge",
+      amountCents: 500,
+      status: "captured",
+      createdAt: jobDocs[1].completedAt,
+      updatedAt: jobDocs[1].completedAt,
+    },
+    {
+      jobId: jobIds[1],
+      machineId: machineIds[1],
+      type: "provider_payout",
+      amountCents: 400,
+      status: "pending",
+      createdAt: jobDocs[1].completedAt,
+      updatedAt: jobDocs[1].completedAt,
+    },
+    {
+      jobId: jobIds[1],
+      machineId: machineIds[1],
+      type: "platform_fee",
+      amountCents: 100,
+      status: "captured",
+      createdAt: jobDocs[1].completedAt,
+      updatedAt: jobDocs[1].completedAt,
+    },
   ]);
-  console.log("✅ Seeded 18 job events");
 
-  console.log("\n🎉 Seed complete!");
+  await Promise.all([
+    db.collection("machines").createIndex({ status: 1, lastHeartbeatAt: -1 }),
+    db.collection("machines").createIndex({ createdAt: -1 }),
+    db.collection("jobs").createIndex({ machineId: 1, status: 1, createdAt: 1 }),
+    db.collection("jobs").createIndex({ status: 1, createdAt: -1 }),
+    db.collection("jobs").createIndex({ createdAt: -1 }),
+    db.collection("jobevents").createIndex({ jobId: 1, createdAt: -1 }),
+    db.collection("jobevents").createIndex({ machineId: 1, createdAt: -1 }),
+    db.collection("jobevents").createIndex({ createdAt: -1 }),
+    db.collection("ledgerentries").createIndex({ jobId: 1, type: 1 }, { unique: true }),
+    db.collection("ledgerentries").createIndex({ machineId: 1, createdAt: -1 }),
+  ]);
+
+  console.log(`Seeded ${machineIds.length} machines`);
+  console.log(`Seeded ${jobIds.length} jobs`);
+  console.log("Seeded job events, ledger entries, and indexes after full DB reset");
+
   await mongoose.disconnect();
-  process.exit(0);
 }
 
-seed().catch((err) => {
-  console.error("❌ Seed failed:", err);
+seed().catch(async (error) => {
+  console.error("Seed failed:", error);
+  await mongoose.disconnect().catch(() => undefined);
   process.exit(1);
 });

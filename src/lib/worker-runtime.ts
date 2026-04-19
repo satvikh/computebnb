@@ -9,9 +9,11 @@ function applySnapshot(state: WorkerState, snapshot: WorkerRuntimeSnapshot): Wor
   return {
     ...state,
     registered: snapshot.registered,
+    availability: snapshot.availability,
     machine: snapshot.machine,
     metrics: snapshot.metrics,
     activeJob: snapshot.activeJob,
+    latestOutput: snapshot.latestOutput,
     recentJobs: snapshot.recentJobs,
     earnings: snapshot.earnings,
     settings: snapshot.settings,
@@ -33,6 +35,7 @@ function applyWorkerEvent(state: WorkerState, event: WorkerEvent): WorkerState {
       return {
         ...state,
         registered: true,
+        availability: "inactive",
         machine: event.machine,
         settings: event.settings
       };
@@ -64,18 +67,42 @@ function applyWorkerEvent(state: WorkerState, event: WorkerEvent): WorkerState {
       return {
         ...state,
         activeJob: event.job,
+        latestOutput: {
+          jobId: event.job.id,
+          jobName: event.job.name,
+          state: "running",
+          summary: "Current job output is still streaming",
+          detail: "The producer is processing one workload at a time on this machine.",
+          updatedAt: event.job.startedAt
+        },
         machine: { ...state.machine, status: "busy" }
       };
     case "job_progress":
       return {
         ...state,
         activeJob: event.job,
+        latestOutput: {
+          jobId: event.job.id,
+          jobName: event.job.name,
+          state: "running",
+          summary: `${event.job.progress.toFixed(0)}% complete`,
+          detail: event.job.executionOutput ?? "Intermediate output is being produced locally.",
+          updatedAt: new Date().toISOString()
+        },
         machine: { ...state.machine, status: "busy" }
       };
     case "job_completed":
       return {
         ...state,
         activeJob: null,
+        latestOutput: {
+          jobId: event.job.id,
+          jobName: event.job.name,
+          state: event.job.status === "failed" ? "failed" : "ready",
+          summary: event.job.status === "failed" ? "Latest output failed verification" : "Latest output ready",
+          detail: event.job.executionError ?? event.job.executionOutput ?? "The latest job finished without a detailed artifact summary.",
+          updatedAt: event.job.estimatedCompletionAt ?? new Date().toISOString()
+        },
         recentJobs: event.recentJobs,
         machine: { ...state.machine, status: "idle" }
       };

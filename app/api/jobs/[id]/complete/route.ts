@@ -1,16 +1,19 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import dbConnect from "@/lib/db";
-import { Job, Assignment, Provider, JobEvent } from "@/lib/models";
+import { Job, JobEvent, Machine } from "@/lib/models";
 import { buildProofHash, calculateSuccessRate, formatJob, getDbUnavailablePayload } from "@/lib/marketplace";
 import { calculateRuntimePricing } from "@/lib/pricing";
-import { assignNextJob } from "@/lib/scheduling";
 import { recordCompletedJobLedger } from "@/lib/ledger";
 import { requireProvider } from "@/lib/provider-auth";
 
 const schema = z.object({
-  providerId: z.string().min(1),
-  result: z.string().min(1),
+  machineId: z.string().min(1).optional(),
+  providerId: z.string().min(1).optional(),
+  stdout: z.string().optional(),
+  stderr: z.string().optional(),
+  result: z.string().optional(),
+  exitCode: z.coerce.number().int().optional(),
   message: z.string().optional(),
 });
 
@@ -22,92 +25,86 @@ export async function POST(
     await dbConnect();
     const { id } = await params;
     const input = schema.parse(await request.json());
-    const auth = await requireProvider(request, input.providerId);
+    const machineId = input.machineId ?? input.providerId;
+    if (!machineId) {
+      return NextResponse.json({ error: "machineId is required" }, { status: 400 });
+    }
+
+    const auth = await requireProvider(request, machineId);
     if (auth.response) return auth.response;
 
-    const existingAssignment = await Assignment.findOne({
-      jobId: id,
-      providerId: input.providerId,
-      status: "completed"
-    });
-    if (existingAssignment) {
-      const existingJob = await Job.findById(id);
-      const existingProvider = await Provider.findById(input.providerId);
-      if (!existingJob) {
-        return NextResponse.json({ error: "Job not found" }, { status: 404 });
-      }
-      return NextResponse.json({ job: formatJob(existingJob, existingProvider?.name ?? null) });
-    }
-
-    const assignment = await Assignment.findOne({
-      jobId: id,
-      providerId: input.providerId,
-      status: "running"
-    });
-    if (!assignment) {
-      return NextResponse.json({ error: "Running provider mismatch" }, { status: 403 });
-    }
-
-    const [job, provider] = await Promise.all([
-      Job.findById(id),
-      Provider.findById(input.providerId)
+    const [job, machine] = await Promise.all([
+      Job.findOne({ _id: id, machineId }),
+      Machine.findById(machineId)
     ]);
     if (!job) {
-      return NextResponse.json({ error: "Job not found" }, { status: 404 });
+      return NextResponse.json({ error: "Job not found for machine" }, { status: 404 });
     }
-    if (!provider) {
-      return NextResponse.json({ error: "Provider not found" }, { status: 404 });
+    if (!machine) {
+      return NextResponse.json({ error: "Machine not found" }, { status: 404 });
+    }
+    if (job.status === "completed") {
+      return NextResponse.json({ job: formatJob(job, machine.name) });
+    }
+    if (job.status === "failed") {
+      return NextResponse.json({ error: "Cannot complete a failed job" }, { status: 409 });
     }
 
     const completedAt = new Date();
+    const stdout = input.stdout ?? input.result ?? job.stdout ?? "";
+    const stderr = input.stderr ?? job.stderr ?? "";
+    const startedAt = job.startedAt ?? completedAt;
     const runtimeSeconds = Math.max(
       1,
-      Math.round((completedAt.getTime() - (assignment.startedAt?.getTime() ?? job.startedAt?.getTime() ?? job.createdAt.getTime())) / 1000)
+      Math.round((completedAt.getTime() - startedAt.getTime()) / 1000)
     );
     const { jobCostCents, providerPayoutCents, platformFeeCents } = calculateRuntimePricing({
       runtimeSeconds,
-      hourlyRateCents: provider.hourlyRateCents,
+      hourlyRateCents: machine.hourlyRateCents,
       budgetCents: job.budgetCents
     });
 
-    assignment.status = "completed";
-    assignment.completedAt = completedAt;
-    await assignment.save();
-
     job.status = "completed";
-    job.result = input.result;
+    job.startedAt = startedAt;
+    job.stdout = stdout;
+    job.stderr = stderr;
+    job.exitCode = input.exitCode ?? 0;
     job.completedAt = completedAt;
     job.actualRuntimeSeconds = runtimeSeconds;
     job.jobCostCents = jobCostCents;
     job.providerPayoutCents = providerPayoutCents;
     job.platformFeeCents = platformFeeCents;
-    job.proofHash = buildProofHash(input.result);
+    job.proofHash = buildProofHash(stdout, stderr);
+    job.failureReason = undefined;
+    job.error = undefined;
     await job.save();
 
     await recordCompletedJobLedger({
       jobId: job._id,
-      providerId: provider._id,
+      machineId: machine._id,
       budgetCents: jobCostCents,
       providerPayoutCents,
       platformFeeCents
     });
 
-    provider.status = "online";
-    provider.completedJobs += 1;
-    provider.successRate = calculateSuccessRate(provider.completedJobs, provider.failedJobs);
-    await provider.save();
+    machine.completedJobs += 1;
+    machine.successRate = calculateSuccessRate(machine.completedJobs, machine.failedJobs);
+    machine.lastHeartbeatAt = completedAt;
+    machine.status = "online";
+    await machine.save();
 
     await JobEvent.create({
       jobId: id,
-      providerId: input.providerId,
+      machineId,
       type: "completed",
-      message: input.message ?? `Worker completed job · checksum ${job.proofHash}`
+      message: input.message ?? `Machine completed job · checksum ${job.proofHash}`
     });
 
-    await assignNextJob();
-
-    return NextResponse.json({ job: formatJob(job, provider.name) });
+    return NextResponse.json({ job: formatJob(job, machine.name) });
   } catch (error) {
+    if (error instanceof z.ZodError) {
+      return NextResponse.json({ error: "Invalid completion payload", issues: error.issues }, { status: 400 });
+    }
     if (error instanceof Error && error.message.includes("MONGODB_URI")) {
       return NextResponse.json(getDbUnavailablePayload(), { status: 503 });
     }

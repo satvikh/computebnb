@@ -17,7 +17,7 @@ export default function SetupPage() {
       <div className="relative mx-auto max-w-6xl">
         <p className="text-xs font-semibold uppercase tracking-[0.3em] text-emerald-200">First-run setup</p>
         <h1 className="mt-3 text-4xl font-semibold tracking-tight">Register this machine</h1>
-        <p className="mt-3 max-w-2xl text-zinc-400">ComputeBNB detected your local specs. Choose exactly when this node can contribute compute.</p>
+        <p className="mt-3 max-w-2xl text-zinc-400">ComputeBNB detected your local specs. This MVP registers one local machine and lets you decide when it becomes active.</p>
 
         <div className="mt-8 grid gap-5 lg:grid-cols-[0.9fr_1.1fr]">
           <section className="rounded-lg border border-white/10 bg-white/[0.055] p-5 shadow-[0_24px_80px_rgba(0,0,0,0.28)]">
@@ -39,6 +39,7 @@ export default function SetupPage() {
 
           <section className="rounded-lg border border-white/10 bg-white/[0.055] p-5 shadow-[0_24px_80px_rgba(0,0,0,0.28)]">
             <h2 className="text-xl font-semibold">Worker preferences</h2>
+            <p className="mt-2 text-sm leading-6 text-zinc-400">These settings apply to this machine only. You can still change availability later from the dashboard or settings.</p>
             <div className="mt-5 space-y-3">
               <SettingToggleRow title="Available when charging only" description="Pause new jobs if the laptop is unplugged." checked={state.settings.chargingOnly} onCheckedChange={(checked) => dispatch({ type: "UPDATE_SETTINGS", settings: { chargingOnly: checked } })} />
               <CpuLimitSlider value={state.settings.cpuLimit} onChange={(value) => dispatch({ type: "UPDATE_SETTINGS", settings: { cpuLimit: value } })} />
@@ -49,7 +50,7 @@ export default function SetupPage() {
               className="mt-6 h-12 w-full bg-emerald-300 text-zinc-950 hover:bg-emerald-200"
               onClick={() => {
                 registerMachine(state.settings);
-                router.push("/dashboard");
+                router.push("/provider/dashboard");
               }}
             >
               Register machine and open dashboard

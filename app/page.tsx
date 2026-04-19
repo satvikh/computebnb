@@ -229,7 +229,8 @@ export default function Theme0Landing() {
                   ⌘ L
                 </span>
               </Link>
-              <button
+              <Link
+                href="/providers"
                 style={{
                   padding: "14px 22px",
                   border: "1px solid var(--rule)",
@@ -239,11 +240,12 @@ export default function Theme0Landing() {
                   fontSize: 14,
                   fontWeight: 500,
                   borderRadius: 2,
-                  cursor: "pointer"
+                  display: "inline-flex",
+                  alignItems: "center"
                 }}
               >
-                Submit a job
-              </button>
+                Browse machines
+              </Link>
               <div
                 style={{
                   display: "flex",

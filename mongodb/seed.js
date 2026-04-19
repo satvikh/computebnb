@@ -4,30 +4,39 @@
 
 const now = new Date();
 
-const providerResult = db.providers.insertOne({
-  name: "Sample M2 Laptop",
+const machineResult = db.machines.insertOne({
+  name: "Sample Python Laptop",
   status: "online",
-  capabilities: ["cpu", "node", "lightweight-ai"],
+  capabilities: ["python", "cpu"],
   hourlyRateCents: 300,
   totalEarnedCents: 0,
+  completedJobs: 0,
+  failedJobs: 0,
+  successRate: 100,
+  trustScore: 100,
   lastHeartbeatAt: now,
-  createdAt: now
+  createdAt: now,
+  updatedAt: now
 });
 
 const jobResult = db.jobs.insertOne({
-  title: "Summarize launch notes",
-  type: "text_generation",
+  title: "Run sample Python summary",
+  type: "python",
   status: "queued",
-  input: "Summarize these hackathon launch notes into three bullets.",
+  machineId: machineResult.insertedId,
+  source: "print('GPUbnb sample job')",
+  stdout: "",
+  stderr: "",
   budgetCents: 700,
   createdAt: now,
   updatedAt: now
 });
 
-db.job_events.insertOne({
+db.jobevents.insertOne({
   jobId: jobResult.insertedId,
-  providerId: providerResult.insertedId,
-  type: "created",
-  message: "Seed job created",
-  createdAt: now
+  machineId: machineResult.insertedId,
+  type: "queued",
+  message: "Seed job queued for Sample Python Laptop",
+  createdAt: now,
+  updatedAt: now
 });

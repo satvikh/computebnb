@@ -1,173 +1,130 @@
-import { Provider, Job, Assignment, JobEvent } from "@/lib/models";
-import type { IAssignment } from "@/lib/models";
-import { HEARTBEAT_STALE_MS, MAX_JOB_RETRIES } from "@/lib/marketplace";
+import { Job, JobEvent, Machine } from "@/lib/models";
+import { HEARTBEAT_STALE_MS } from "@/lib/marketplace";
 
-async function requeueOrFailJob(jobId: string, providerId: string | null, reason: string) {
-  const job = await Job.findById(jobId);
-  if (!job) return;
+export interface SchedulingAssignment {
+  _id: string;
+  jobId: string;
+  providerId: string;
+  status: "assigned" | "running";
+  startedAt: Date | null;
+  completedAt: null;
+  createdAt: Date;
+}
 
-  const nextRetryCount = (job.retryCount ?? 0) + 1;
-  const shouldRetry = nextRetryCount <= MAX_JOB_RETRIES;
-
-  if (providerId) {
-    await Provider.findByIdAndUpdate(providerId, { $set: { status: "offline" }, $inc: { failedJobs: 1 } });
-    const provider = await Provider.findById(providerId).lean();
-    if (provider) {
-      const total = (provider.completedJobs ?? 0) + (provider.failedJobs ?? 0);
-      const successRate = total === 0 ? 100 : Number((((provider.completedJobs ?? 0) / total) * 100).toFixed(1));
-      await Provider.findByIdAndUpdate(providerId, { $set: { successRate } });
-    }
-  }
-
-  await Assignment.findOneAndDelete({ jobId });
-
-  await JobEvent.create({
+function syntheticAssignment(
+  jobId: string,
+  machineId: string,
+  createdAt: Date,
+  startedAt?: Date | null
+): SchedulingAssignment {
+  return {
+    _id: `job-${jobId}`,
     jobId,
-    providerId: providerId || undefined,
-    type: "failed",
-    message: reason
-  });
+    providerId: machineId,
+    status: startedAt ? "running" : "assigned",
+    startedAt: startedAt ?? null,
+    completedAt: null,
+    createdAt,
+  };
+}
 
-  if (shouldRetry) {
-    await Job.findByIdAndUpdate(jobId, {
+async function markJobFailedForOfflineMachine(jobId: string, machineId: string, reason: string) {
+  const completedAt = new Date();
+
+  const job = await Job.findOneAndUpdate(
+    { _id: jobId, status: "running" },
+    {
       $set: {
-        status: "queued",
+        status: "failed",
+        completedAt,
+        exitCode: 1,
         failureReason: reason,
-        error: reason
+        error: reason,
       },
-      $inc: {
-        retryCount: 1
-      },
-      $unset: {
-        assignedProviderId: 1,
-        startedAt: 1,
-        completedAt: 1,
-        actualRuntimeSeconds: 1
-      }
-    });
+    },
+    { new: true }
+  );
 
-    await JobEvent.create({
-      jobId,
-      type: "created",
-      message: `Requeued after failure: ${reason}`
-    });
+  if (!job) {
     return;
   }
 
-  await Job.findByIdAndUpdate(jobId, {
-    $set: {
-      status: "failed",
-      failureReason: reason,
-      error: reason,
-      completedAt: new Date()
-    },
-    $inc: {
-      retryCount: 1
-    }
+  await Machine.findByIdAndUpdate(machineId, {
+    $set: { status: "offline" },
+    $inc: { failedJobs: 1 },
+  });
+
+  await JobEvent.create({
+    jobId: job._id,
+    machineId,
+    type: "failed",
+    message: reason,
   });
 }
 
 export async function reapStaleAssignments() {
   const heartbeatCutoff = new Date(Date.now() - HEARTBEAT_STALE_MS);
-  const staleAssignments = await Assignment.find({
-    status: { $in: ["assigned", "running"] },
-    updatedAt: { $lte: heartbeatCutoff }
+  const staleMachines = await Machine.find({
+    status: { $in: ["online", "busy"] },
+    lastHeartbeatAt: { $lt: heartbeatCutoff },
   }).lean();
 
-  for (const assignment of staleAssignments) {
-    const provider = await Provider.findById(assignment.providerId).lean();
-    const lastHeartbeatAt = provider?.lastHeartbeatAt?.getTime() ?? 0;
-    if (lastHeartbeatAt && lastHeartbeatAt >= heartbeatCutoff.getTime()) {
-      continue;
-    }
+  if (!staleMachines.length) {
+    return;
+  }
 
-    await requeueOrFailJob(
-      String(assignment.jobId),
-      provider ? String(provider._id) : null,
-      "Provider heartbeat timed out during execution"
-    );
+  await Machine.updateMany(
+    { _id: { $in: staleMachines.map((machine) => machine._id) } },
+    { $set: { status: "offline" } }
+  );
+
+  for (const machine of staleMachines) {
+    const runningJobs = await Job.find({
+      machineId: machine._id,
+      status: "running",
+    }).lean();
+
+    for (const job of runningJobs) {
+      await markJobFailedForOfflineMachine(
+        String(job._id),
+        String(machine._id),
+        "Machine heartbeat timed out during execution"
+      );
+    }
   }
 }
 
-/**
- * Simple hackathon scheduler: pick the first compatible idle provider
- * with a recent heartbeat and assign the first queued job.
- *
- * Uses atomic findOneAndUpdate calls to avoid double-assigning.
- */
-export async function assignNextJob(): Promise<IAssignment | null> {
-  await reapStaleAssignments();
+export async function assignNextJob(): Promise<SchedulingAssignment | null> {
+  return null;
+}
 
-  // 1. Find the first queued job
-  const job = await Job.findOne({ status: "queued" }).sort({ createdAt: 1 });
-  if (!job) return null;
+export async function getAssignmentForProvider(providerId: string): Promise<SchedulingAssignment | null> {
+  const job = await Job.findOne({
+    machineId: providerId,
+    status: { $in: ["queued", "running"] },
+  })
+    .sort({ status: 1, createdAt: 1 })
+    .lean();
 
-  // 2. Find a compatible idle provider with a recent heartbeat
-  const heartbeatCutoff = new Date(Date.now() - HEARTBEAT_STALE_MS);
-  const provider = await Provider.findOneAndUpdate(
-    {
-      status: "online",
-      lastHeartbeatAt: { $gte: heartbeatCutoff },
-      capabilities: { $all: job.requiredCapabilities ?? [] },
-    },
-    { $set: { status: "busy" } },
-    { new: true }
-  );
-  if (!provider) return null;
-
-  // 3. Atomically claim the job so no other scheduler picks it
-  const claimed = await Job.findOneAndUpdate(
-    { _id: job._id, status: "queued" },
-    { $set: { status: "assigned" } },
-    { new: true }
-  );
-  if (!claimed) {
-    // Another request claimed it — roll back provider status
-    await Provider.findByIdAndUpdate(provider._id, { status: "online" });
+  if (!job) {
     return null;
   }
 
-  // 4. Create the assignment
-  const assignment = await Assignment.create({
-    jobId: claimed._id,
-    providerId: provider._id,
-    status: "assigned",
-  }).catch(async (caught: unknown) => {
-    await Job.findByIdAndUpdate(claimed._id, { status: "queued" });
-    await Provider.findByIdAndUpdate(provider._id, { status: "online" });
-    throw caught;
-  });
-
-  claimed.assignedProviderId = provider._id;
-  await claimed.save();
-
-  // 5. Log the event
-  await JobEvent.create({
-    jobId: claimed._id,
-    providerId: provider._id,
-    type: "assigned",
-    message: `Assigned to ${provider.name}`,
-  });
-
-  return assignment;
-}
-
-/**
- * Return the active assignment (assigned | running) for a given provider.
- */
-export async function getAssignmentForProvider(providerId: string) {
-  return Assignment.findOne({
-    providerId,
-    status: { $in: ["assigned", "running"] },
-  });
+  return syntheticAssignment(
+    String(job._id),
+    String(job.machineId),
+    job.createdAt,
+    job.startedAt ?? null
+  );
 }
 
 export async function markStaleProvidersOffline() {
   const heartbeatCutoff = new Date(Date.now() - HEARTBEAT_STALE_MS);
-  return Provider.updateMany(
+
+  return Machine.updateMany(
     {
-      status: "online",
-      lastHeartbeatAt: { $lt: heartbeatCutoff }
+      status: { $in: ["online", "busy"] },
+      lastHeartbeatAt: { $lt: heartbeatCutoff },
     },
     { $set: { status: "offline" } }
   );
