@@ -1,11 +1,10 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import dbConnect from "@/lib/db";
-import { Consumer, Job, JobEvent, Machine } from "@/lib/models";
-import { buildProofHash, calculateSuccessRate, formatJob, getDbUnavailablePayload } from "@/lib/marketplace";
-import { calculateRuntimePricing } from "@/lib/pricing";
+import { Job, Machine, User } from "@/lib/models";
+import { formatJob } from "@/lib/mvp";
 import { recordCompletedJobLedger } from "@/lib/ledger";
-import { requireProvider } from "@/lib/provider-auth";
+import { calculateRuntimePricing } from "@/lib/pricing";
 import {
   SOLANA_CENTS_PER_SOL,
   centsToLamports,
@@ -14,13 +13,10 @@ import {
 } from "@/lib/solana";
 
 const schema = z.object({
-  machineId: z.string().min(1).optional(),
-  providerId: z.string().min(1).optional(),
-  stdout: z.string().optional(),
-  stderr: z.string().optional(),
-  result: z.string().optional(),
-  exitCode: z.coerce.number().int().optional(),
-  message: z.string().optional(),
+  machineId: z.string().min(1),
+  stdout: z.string().default(""),
+  stderr: z.string().default(""),
+  exitCode: z.coerce.number().int().default(0),
 });
 
 export async function POST(
@@ -31,17 +27,10 @@ export async function POST(
     await dbConnect();
     const { id } = await params;
     const input = schema.parse(await request.json());
-    const machineId = input.machineId ?? input.providerId;
-    if (!machineId) {
-      return NextResponse.json({ error: "machineId is required" }, { status: 400 });
-    }
-
-    const auth = await requireProvider(request, machineId);
-    if (auth.response) return auth.response;
 
     const [job, machine] = await Promise.all([
-      Job.findOne({ _id: id, machineId }),
-      Machine.findById(machineId)
+      Job.findOne({ _id: id, machineId: input.machineId }),
+      Machine.findById(input.machineId)
     ]);
     if (!job) {
       return NextResponse.json({ error: "Job not found for machine" }, { status: 404 });
@@ -56,32 +45,13 @@ export async function POST(
       return NextResponse.json({ error: "Cannot complete a failed job" }, { status: 409 });
     }
 
-    const completedAt = new Date();
-    const stdout = input.stdout ?? input.result ?? job.stdout ?? "";
-    const stderr = input.stderr ?? job.stderr ?? "";
-    const startedAt = job.startedAt ?? completedAt;
-    const runtimeSeconds = Math.max(
-      1,
-      Math.round((completedAt.getTime() - startedAt.getTime()) / 1000)
-    );
-    const { jobCostCents } = calculateRuntimePricing({
-      runtimeSeconds,
-      hourlyRateCents: machine.hourlyRateCents,
-      budgetCents: job.budgetCents
-    });
-    const providerPayoutCents = jobCostCents;
-    const platformFeeCents = 0;
-
-    if (!job.consumerId) {
-      return NextResponse.json(
-        { error: "Job has no consumer wallet attached for Solana payment" },
-        { status: 409 }
-      );
+    const consumer = await User.findOne({ _id: job.consumerUserId, role: "consumer" });
+    if (!consumer) {
+      return NextResponse.json({ error: "Consumer user not found" }, { status: 404 });
     }
 
-    const consumer = await Consumer.findById(job.consumerId);
-    if (!consumer) {
-      return NextResponse.json({ error: "Consumer wallet not found" }, { status: 404 });
+    if (!consumer.walletAddress || !consumer.walletSecretKey) {
+      return NextResponse.json({ error: "Consumer wallet not configured" }, { status: 409 });
     }
 
     if (!machine.walletAddress || !machine.walletSecretKey) {
@@ -89,87 +59,77 @@ export async function POST(
       machine.walletAddress = wallet.walletAddress;
       machine.walletSecretKey = wallet.walletSecretKey;
       machine.walletNetwork = wallet.walletNetwork;
-      await machine.save();
     }
 
-    const solanaPaymentLamports = centsToLamports(jobCostCents);
-    let solanaPaymentSignature: string;
+    const completedAt = new Date();
+    const startedAt = job.startedAt ?? completedAt;
+    const runtimeSeconds = Math.max(
+      1,
+      Math.round((completedAt.getTime() - startedAt.getTime()) / 1000)
+    );
+    const pricing = calculateRuntimePricing({
+      runtimeSeconds,
+      hourlyRateCents: machine.hourlyRateCents,
+      budgetCents: job.budgetCents,
+    });
+
+    const solanaPaymentLamports = centsToLamports(pricing.jobCostCents);
+    let solanaPaymentSignature: string | null = null;
+    let solanaPaymentStatus: "pending" | "settled" | "failed" = "pending";
     try {
       solanaPaymentSignature = await transferDevnetSol({
         fromSecretKey: consumer.walletSecretKey,
         toWalletAddress: machine.walletAddress,
         lamports: solanaPaymentLamports,
       });
-    } catch (error) {
-      job.solanaPaymentStatus = "failed";
-      job.solanaPaymentLamports = solanaPaymentLamports;
-      job.solanaCentsPerSol = SOLANA_CENTS_PER_SOL;
-      await job.save();
-
-      const message = error instanceof Error ? error.message : "Solana payment failed";
-      return NextResponse.json(
-        { error: "Solana devnet payment failed", message },
-        { status: 402 }
-      );
+      solanaPaymentStatus = "settled";
+    } catch {
+      solanaPaymentStatus = "failed";
     }
 
     job.status = "completed";
     job.startedAt = startedAt;
-    job.stdout = stdout;
-    job.stderr = stderr;
-    job.exitCode = input.exitCode ?? 0;
+    job.stdout = input.stdout;
+    job.stderr = input.stderr;
+    job.exitCode = input.exitCode;
     job.completedAt = completedAt;
     job.actualRuntimeSeconds = runtimeSeconds;
-    job.jobCostCents = jobCostCents;
-    job.providerPayoutCents = providerPayoutCents;
-    job.platformFeeCents = platformFeeCents;
+    job.jobCostCents = pricing.jobCostCents;
+    job.providerPayoutCents = pricing.providerPayoutCents;
+    job.platformFeeCents = pricing.platformFeeCents;
     job.solanaPaymentLamports = solanaPaymentLamports;
     job.solanaPaymentSignature = solanaPaymentSignature;
-    job.solanaPaymentStatus = "settled";
+    job.solanaPaymentStatus = solanaPaymentStatus;
     job.solanaCentsPerSol = SOLANA_CENTS_PER_SOL;
-    job.proofHash = buildProofHash(stdout, stderr);
-    job.failureReason = undefined;
-    job.error = undefined;
     await job.save();
+
+    machine.status = "active";
+    await machine.save();
 
     await recordCompletedJobLedger({
       jobId: job._id,
       machineId: machine._id,
-      consumerId: consumer._id,
-      budgetCents: jobCostCents,
-      providerPayoutCents,
-      platformFeeCents,
+      consumerUserId: consumer._id,
+      budgetCents: pricing.jobCostCents,
+      providerPayoutCents: pricing.providerPayoutCents,
+      platformFeeCents: pricing.platformFeeCents,
       solanaLamports: solanaPaymentLamports,
-      solanaSignature: solanaPaymentSignature,
+      solanaSignature: solanaPaymentSignature ?? undefined,
       fromWalletAddress: consumer.walletAddress,
       toWalletAddress: machine.walletAddress,
-      solanaCentsPerSol: SOLANA_CENTS_PER_SOL
+      solanaCentsPerSol: SOLANA_CENTS_PER_SOL,
     });
 
-    consumer.totalSpentCents += jobCostCents;
+    consumer.totalSpentCents += pricing.jobCostCents;
     await consumer.save();
-
-    machine.completedJobs += 1;
-    machine.successRate = calculateSuccessRate(machine.completedJobs, machine.failedJobs);
-    machine.lastHeartbeatAt = completedAt;
-    machine.status = "online";
-    await machine.save();
-
-    await JobEvent.create({
-      jobId: id,
-      machineId,
-      type: "completed",
-      message: input.message ?? `Machine completed job · checksum ${job.proofHash}`
-    });
 
     return NextResponse.json({ job: formatJob(job, machine.name) });
   } catch (error) {
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "Invalid completion payload", issues: error.issues }, { status: 400 });
     }
-    if (error instanceof Error && error.message.includes("MONGODB_URI")) {
-      return NextResponse.json(getDbUnavailablePayload(), { status: 503 });
-    }
     return NextResponse.json({ error: "Failed to complete job" }, { status: 500 });
   }
 }
+
+export { POST as PATCH };

@@ -3,8 +3,8 @@ import mongoose, { Document, Model, Schema, Types } from "mongoose";
 export interface ILedgerEntry extends Document {
   jobId: Types.ObjectId;
   machineId?: Types.ObjectId;
-  consumerId?: Types.ObjectId;
-  type: "job_charge" | "provider_payout" | "machine_payout" | "platform_fee" | "refund";
+  consumerUserId?: Types.ObjectId;
+  type: "job_charge" | "provider_payout" | "platform_fee" | "refund";
   amountCents: number;
   solanaLamports?: number;
   solanaSignature?: string;
@@ -20,10 +20,10 @@ const LedgerEntrySchema = new Schema<ILedgerEntry>(
   {
     jobId: { type: Schema.Types.ObjectId, ref: "Job", required: true },
     machineId: { type: Schema.Types.ObjectId, ref: "Machine" },
-    consumerId: { type: Schema.Types.ObjectId, ref: "Consumer" },
+    consumerUserId: { type: Schema.Types.ObjectId, ref: "User" },
     type: {
       type: String,
-      enum: ["job_charge", "provider_payout", "machine_payout", "platform_fee", "refund"],
+      enum: ["job_charge", "provider_payout", "platform_fee", "refund"],
       required: true,
     },
     amountCents: { type: Number, required: true, min: 0 },
@@ -38,12 +38,12 @@ const LedgerEntrySchema = new Schema<ILedgerEntry>(
       required: true,
     },
   },
-  { timestamps: true }
+  { timestamps: true, collection: "ledgerentries" }
 );
 
 LedgerEntrySchema.index({ jobId: 1, type: 1 }, { unique: true });
 LedgerEntrySchema.index({ machineId: 1, createdAt: -1 });
-LedgerEntrySchema.index({ consumerId: 1, createdAt: -1 });
+LedgerEntrySchema.index({ consumerUserId: 1, createdAt: -1 });
 
 const LedgerEntry: Model<ILedgerEntry> =
   mongoose.models.LedgerEntry || mongoose.model<ILedgerEntry>("LedgerEntry", LedgerEntrySchema);

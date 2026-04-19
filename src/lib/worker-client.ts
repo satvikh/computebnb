@@ -26,7 +26,14 @@ export interface WorkerControlClient {
   subscribeToWorkerEvents: (onEvent: (event: WorkerEvent) => void) => Promise<() => void>;
 }
 
-const isTauriRuntime = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+function hasTauriRuntime() {
+  const maybeWindow = typeof window === "undefined" ? null : (window as typeof window & { __TAURI_INTERNALS__?: unknown });
+  return (
+    maybeWindow !== null &&
+    typeof maybeWindow.__TAURI_INTERNALS__ === "object" &&
+    maybeWindow.__TAURI_INTERNALS__ !== null
+  );
+}
 
 let mockSnapshot: WorkerRuntimeSnapshot = {
   registered: initialWorkerState.registered,
@@ -514,7 +521,7 @@ export const workerClient: WorkerControlClient = {
   async subscribeToWorkerEvents(onEvent) {
     const tauriUnlisten = await listenToTauriWorkerEvents(onEvent);
 
-    if (isTauriRuntime) {
+    if (hasTauriRuntime()) {
       return tauriUnlisten;
     }
 

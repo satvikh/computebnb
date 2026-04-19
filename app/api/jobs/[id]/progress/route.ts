@@ -1,13 +1,11 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import dbConnect from "@/lib/db";
-import { formatJob, getDbUnavailablePayload } from "@/lib/marketplace";
-import { Job, JobEvent, Machine } from "@/lib/models";
-import { requireProvider } from "@/lib/provider-auth";
+import { formatJob } from "@/lib/mvp";
+import { Job, Machine } from "@/lib/models";
 
 const schema = z.object({
-  machineId: z.string().min(1).optional(),
-  providerId: z.string().min(1).optional(),
+  machineId: z.string().min(1),
   message: z.string().default("Worker reported progress"),
   stdout: z.string().optional(),
   stderr: z.string().optional(),
@@ -21,15 +19,8 @@ export async function POST(
     await dbConnect();
     const { id } = await params;
     const input = schema.parse(await request.json());
-    const machineId = input.machineId ?? input.providerId;
-    if (!machineId) {
-      return NextResponse.json({ error: "machineId is required" }, { status: 400 });
-    }
 
-    const auth = await requireProvider(request, machineId);
-    if (auth.response) return auth.response;
-
-    const existingJob = await Job.findOne({ _id: id, machineId });
+    const existingJob = await Job.findOne({ _id: id, machineId: input.machineId });
     if (!existingJob) {
       return NextResponse.json({ error: "Job not found for machine" }, { status: 404 });
     }
@@ -45,31 +36,25 @@ export async function POST(
           stderr: input.stderr ?? existingJob.stderr,
         },
       },
-      { new: true }
+      { returnDocument: "after" }
     );
     if (!job) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
     }
 
-    await Machine.findByIdAndUpdate(machineId, {
-      $set: { status: "busy", lastHeartbeatAt: new Date() },
-    });
+    const machine = await Machine.findByIdAndUpdate(
+      input.machineId,
+      { $set: { status: "busy" } },
+      { returnDocument: "after" }
+    ).lean();
 
-    await JobEvent.create({
-      jobId: id,
-      machineId,
-      type: "progress",
-      message: input.message,
-    });
-
-    return NextResponse.json({ job: formatJob(job, auth.provider?.name ?? null) });
+    return NextResponse.json({ job: formatJob(job, machine?.name ?? null), message: input.message });
   } catch (error) {
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "Invalid progress payload", issues: error.issues }, { status: 400 });
     }
-    if (error instanceof Error && error.message.includes("MONGODB_URI")) {
-      return NextResponse.json(getDbUnavailablePayload(), { status: 503 });
-    }
     return NextResponse.json({ error: "Failed to report progress" }, { status: 500 });
   }
 }
+
+export { POST as PATCH };

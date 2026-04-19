@@ -13,6 +13,7 @@ export interface Machine {
   name: string;
   os: string;
   cpu: string;
+  gpu?: string;
   memoryGb: number;
   status: WorkerStatus;
   charging: boolean;

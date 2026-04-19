@@ -10,7 +10,7 @@ use std::{
 use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
 use reqwest::{
     blocking::Client,
-    header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE},
+    header::{HeaderMap, HeaderValue, CONTENT_TYPE},
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -258,7 +258,12 @@ impl WorkerManager {
                 .unwrap_or(true);
 
             if heartbeat_due {
-                match send_heartbeat(&self.http, &runtime.api_url, &session) {
+                let remote_status = if runtime.active_execution.is_some() {
+                    "busy"
+                } else {
+                    "active"
+                };
+                match send_heartbeat(&self.http, &runtime.api_url, &session, remote_status) {
                     Ok(heartbeat) => {
                         runtime.network_online = true;
                         runtime.last_heartbeat_at = Some(Instant::now());
@@ -337,6 +342,7 @@ pub struct Machine {
     name: String,
     os: String,
     cpu: String,
+    gpu: String,
     memory_gb: u32,
     status: WorkerStatus,
     charging: bool,
@@ -489,6 +495,7 @@ pub struct SandboxRunnerStatus {
 
 #[derive(Clone)]
 struct ProviderSession {
+    producer_user_id: String,
     provider_id: String,
     provider_token: String,
 }
@@ -546,6 +553,7 @@ impl WorkerRuntime {
                 name: local_machine_name(),
                 os: local_os_name(),
                 cpu: "Docker-backed Python worker".to_string(),
+                gpu: "Docker-compatible".to_string(),
                 memory_gb: 16,
                 status: WorkerStatus::Offline,
                 charging: true,
@@ -565,49 +573,20 @@ impl WorkerRuntime {
                 heartbeat_latency_ms: 0,
             },
             active_job: None,
-            recent_jobs: seed_recent_jobs(),
+            recent_jobs: Vec::new(),
             earnings: Earnings {
-                lifetime: 284.46,
-                pending: 42.83,
-                today: 14.21,
-                completed_jobs: 37,
-                history: vec![
-                    EarningsPoint {
-                        label: "Mon".into(),
-                        amount: 11.42,
-                    },
-                    EarningsPoint {
-                        label: "Tue".into(),
-                        amount: 18.74,
-                    },
-                    EarningsPoint {
-                        label: "Wed".into(),
-                        amount: 9.60,
-                    },
-                    EarningsPoint {
-                        label: "Thu".into(),
-                        amount: 22.18,
-                    },
-                    EarningsPoint {
-                        label: "Fri".into(),
-                        amount: 16.91,
-                    },
-                    EarningsPoint {
-                        label: "Sat".into(),
-                        amount: 27.35,
-                    },
-                    EarningsPoint {
-                        label: "Sun".into(),
-                        amount: 14.70,
-                    },
-                ],
+                lifetime: 0.0,
+                pending: 0.0,
+                today: 0.0,
+                completed_jobs: 0,
+                history: Vec::new(),
             },
             settings,
             network_online: true,
             worker_logs: vec![log(
                 "log-boot",
                 LogLevel::Info,
-                "Control plane ready. Worker is waiting for backend registration.",
+                "Control plane ready. Producer machine is waiting for backend registration.",
             )],
             rng_seed: 0xC0FFEE,
             api_url: repo_env("GPUBNB_API_URL").unwrap_or_else(|| "http://localhost:3000".to_string()),
@@ -877,31 +856,31 @@ fn emit_worker_event<T: Serialize + Clone>(app: &AppHandle, event_name: &str, pa
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ProviderRegisterResponse {
-    provider: RegisteredProvider,
+struct AuthSignInResponse {
+    user: RemoteUser,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RegisteredProvider {
+struct RemoteUser {
+    id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MachineRegisterResponse {
+    machine: RegisteredMachine,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisteredMachine {
     id: String,
     name: String,
-    token: String,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ProviderHeartbeatResponse {
-    provider: ProviderHeartbeatProvider,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProviderHeartbeatProvider {
-    #[serde(default)]
-    last_heartbeat_at: Option<String>,
-}
-
 struct HeartbeatReceipt {
     latency_ms: u32,
 }
@@ -909,44 +888,19 @@ struct HeartbeatReceipt {
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RemotePollResponse {
-    assignment: Option<RemoteAssignment>,
     job: Option<RemoteMarketplaceJob>,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RemoteAssignment {
-    id: String,
-    job_id: String,
 }
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteMarketplaceJob {
     id: String,
-    title: String,
-    #[serde(rename = "type")]
-    job_type: String,
-    input: String,
+    machine_id: String,
+    code: String,
     #[serde(default)]
-    runner_payload: Option<Value>,
+    filename: Option<String>,
     #[serde(default)]
-    budget_cents: Option<u32>,
-    #[serde(default)]
-    provider_payout_cents: Option<u32>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RemoteCompletionResponse {
-    job: RemoteCompletedJob,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RemoteCompletedJob {
-    #[serde(default)]
-    provider_payout_cents: Option<u32>,
+    timeout_seconds: Option<u32>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -1072,21 +1026,24 @@ pub fn register_machine(
     runtime.machine.name = local_machine_name();
     runtime.machine.os = local_os_name();
     runtime.machine.cpu = "Docker-backed Python worker".to_string();
+    runtime.machine.gpu = "Docker-compatible".to_string();
 
-    let registration = register_provider(&manager.http, &runtime.api_url, &runtime.machine);
+    let registration = register_machine_remote(&manager.http, &runtime.api_url, &runtime.machine);
     match registration {
-        Ok(provider) => {
+        Ok((producer_user_id, machine)) => {
             runtime.registered = true;
             runtime.provider_session = Some(ProviderSession {
-                provider_id: provider.id.clone(),
-                provider_token: provider.token.clone(),
+                producer_user_id,
+                provider_id: machine.id.clone(),
+                provider_token: String::new(),
             });
-            runtime.machine.id = provider.id;
+            runtime.machine.id = machine.id;
+            runtime.machine.name = machine.name;
             runtime.machine.status = WorkerStatus::Offline;
             runtime.pause_requested = false;
             let log = runtime.push_log(
                 LogLevel::Success,
-                &format!("Machine registered with backend as {}.", provider.name),
+                "Machine registered with backend.",
             );
             events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
                 event_type: "log_emitted",
@@ -1442,41 +1399,62 @@ pub fn stop_sandbox_runner(
     Ok(manager.sandbox_status())
 }
 
-fn register_provider(
+fn register_machine_remote(
     http: &Client,
     api_url: &str,
     machine: &Machine,
-) -> Result<RegisteredProvider, String> {
-    let response: ProviderRegisterResponse = post_json(
+) -> Result<(String, RegisteredMachine), String> {
+    let normalized_machine_name = machine
+        .name
+        .to_lowercase()
+        .chars()
+        .map(|char| if char.is_ascii_alphanumeric() { char } else { '-' })
+        .collect::<String>();
+    let username = format!("producer-{}", normalized_machine_name.trim_matches('-'));
+
+    let auth: AuthSignInResponse = post_json(
         http,
-        &format!("{api_url}/api/providers/register"),
+        &format!("{api_url}/api/auth/sign-in"),
         HeaderMap::new(),
         &json!({
-            "name": machine.name,
-            "capabilities": ["cpu", "node", "docker", "python"],
-            "hourlyRateCents": 300
+            "username": username,
+            "displayName": machine.name,
+            "role": "producer"
         }),
     )?;
 
-    Ok(response.provider)
+    let registration: MachineRegisterResponse = post_json(
+        http,
+        &format!("{api_url}/api/machines/register"),
+        HeaderMap::new(),
+        &json!({
+            "producerUserId": auth.user.id,
+            "name": machine.name,
+            "cpu": machine.cpu,
+            "gpu": machine.gpu,
+            "ramGb": machine.memory_gb
+        }),
+    )?;
+
+    Ok((auth.user.id, registration.machine))
 }
 
 fn send_heartbeat(
     http: &Client,
     api_url: &str,
     session: &ProviderSession,
+    status: &str,
 ) -> Result<HeartbeatReceipt, String> {
     let started = Instant::now();
-    let response: ProviderHeartbeatResponse = post_json(
+    let _: Value = patch_json(
         http,
-        &format!("{api_url}/api/providers/heartbeat"),
+        &format!("{api_url}/api/machines/{}/status", session.provider_id),
         auth_headers(session)?,
         &json!({
-            "providerId": session.provider_id
+            "status": status
         }),
     )?;
 
-    let _ = response.provider.last_heartbeat_at;
     Ok(HeartbeatReceipt {
         latency_ms: started.elapsed().as_millis().min(u128::from(u32::MAX)) as u32,
     })
@@ -1487,29 +1465,26 @@ fn poll_for_assignment(http: &Client, runtime: &mut WorkerRuntime) -> Result<Vec
         .provider_session
         .clone()
         .ok_or_else(|| "worker is not registered with a provider session".to_string())?;
-    let response: RemotePollResponse = post_json(
+    let response: RemotePollResponse = get_json(
         http,
-        &format!("{}/api/worker/poll", runtime.api_url),
+        &format!(
+            "{}/api/machines/{}/jobs/next",
+            runtime.api_url, session.provider_id
+        ),
         auth_headers(&session)?,
-        &json!({
-            "providerId": session.provider_id
-        }),
     )?;
 
-    let Some(assignment) = response.assignment else {
-        return Ok(vec![]);
-    };
     let Some(job) = response.job else {
         return Ok(vec![]);
     };
 
     let start_path = format!("{}/api/jobs/{}/start", runtime.api_url, job.id);
-    let _: Value = post_json(
+    let _: Value = patch_json(
         http,
         &start_path,
         auth_headers(&session)?,
         &json!({
-            "providerId": session.provider_id
+            "machineId": session.provider_id
         }),
     )?;
 
@@ -1526,20 +1501,17 @@ fn poll_for_assignment(http: &Client, runtime: &mut WorkerRuntime) -> Result<Vec
         .to_rfc3339_opts(SecondsFormat::Millis, true);
     let ui_job = Job {
         id: job.id.clone(),
-        name: job.title.clone(),
-        job_type: map_marketplace_job_type(&job),
+        name: job.filename.clone().unwrap_or_else(|| "script.py".to_string()),
+        job_type: map_marketplace_job_type(),
         status: JobStatus::Running,
         progress: initial_progress_for_state(&runner_response.job.state),
         started_at: Some(started_at.clone()),
         estimated_completion_at: Some(estimated_completion_at),
-        earnings: money(
-            f64::from(job.provider_payout_cents.unwrap_or_else(|| job.budget_cents.unwrap_or(0) * 80 / 100))
-                / 100.0,
-        ),
+        earnings: 0.0,
         cpu_usage: clamp(runtime.settings.cpu_limit * 0.72, 18.0, runtime.settings.cpu_limit),
         memory_usage: 48.0,
         logs: build_ui_logs(&runner_response.job.logs.stdout, &runner_response.job.logs.stderr),
-        execution_output: None,
+        execution_output: Some("Python execution started in Docker.".to_string()),
         execution_error: None,
     };
 
@@ -1558,15 +1530,12 @@ fn poll_for_assignment(http: &Client, runtime: &mut WorkerRuntime) -> Result<Vec
         LogLevel::Success,
         &format!(
             "Backend assigned {}. Docker runner accepted job {} for execution.",
-            job.title, runner_response.job.id
+            ui_job.name, runner_response.job.id
         ),
     );
     let progress_log = runtime.push_log(
         LogLevel::Info,
-        &format!(
-            "Job {} is running in Docker image {}.",
-            assignment.job_id, runner_response.job.image
-        ),
+        &format!("Job {} is running in Docker image {}.", job.id, runner_response.job.image),
     );
 
     Ok(vec![
@@ -1592,7 +1561,7 @@ fn poll_for_assignment(http: &Client, runtime: &mut WorkerRuntime) -> Result<Vec
         RuntimeEvent::LogEmitted(ActivityLogEvent {
             event_type: "log_emitted",
             log: progress_log,
-            job_id: Some(assignment.id),
+            job_id: Some(job.id),
         }),
     ])
 }
@@ -1630,12 +1599,14 @@ fn sync_active_execution(
     let progress_message = build_progress_message(&runner_job, &stdout_delta, &stderr_delta);
     if progress_message.as_deref().is_some() || execution.last_state != runner_job.state {
         let message = progress_message.unwrap_or_else(|| format!("Runner state changed to {}", runner_job.state));
-        let _: Value = post_json(
+        let _: Value = patch_json(
             http,
             &format!("{}/api/jobs/{}/progress", runtime.api_url, execution.remote_job_id),
             auth_headers(&session)?,
             &json!({
-                "providerId": session.provider_id,
+                "machineId": session.provider_id,
+                "stdout": if stdout_delta.trim().is_empty() { Value::Null } else { Value::String(limit_output(&stdout_delta)) },
+                "stderr": if stderr_delta.trim().is_empty() { Value::Null } else { Value::String(limit_output(&stderr_delta)) },
                 "message": limit_output(&message)
             }),
         )?;
@@ -1677,36 +1648,34 @@ fn sync_active_execution(
 
     if is_terminal_state(&runner_job.state) {
         if is_successful_runner_completion(&runner_job) {
-            let result = serialize_completion_result(runtime, &runner_job);
-            let remote_response: RemoteCompletionResponse = post_json(
+            let _: Value = patch_json(
                 http,
                 &format!("{}/api/jobs/{}/complete", runtime.api_url, execution.remote_job_id),
                 auth_headers(&session)?,
                 &json!({
-                    "providerId": session.provider_id,
-                    "result": result,
-                    "message": format!(
-                        "Docker runner completed Python execution with exit code {}",
-                        runner_job
-                            .result
-                            .as_ref()
-                            .and_then(|result| result.exit_code)
-                            .unwrap_or(0)
-                    )
+                    "machineId": session.provider_id,
+                    "stdout": runner_job
+                        .result
+                        .as_ref()
+                        .map(|result| result.logs.stdout.clone())
+                        .unwrap_or_else(|| runner_job.logs.stdout.clone()),
+                    "stderr": runner_job
+                        .result
+                        .as_ref()
+                        .map(|result| result.logs.stderr.clone())
+                        .unwrap_or_else(|| runner_job.logs.stderr.clone()),
+                    "exitCode": runner_job
+                        .result
+                        .as_ref()
+                        .and_then(|result| result.exit_code)
+                        .unwrap_or(0)
                 }),
             )?;
 
             let mut completed_job = active_job.clone();
             completed_job.status = JobStatus::Completed;
             completed_job.progress = 100.0;
-            completed_job.earnings = money(
-                f64::from(
-                    remote_response
-                        .job
-                        .provider_payout_cents
-                        .unwrap_or_else(|| cents_from_dollars(active_job.earnings)),
-                ) / 100.0,
-            );
+            completed_job.earnings = 0.0;
             completed_job.execution_output = Some(limit_output(
                 &runner_job
                     .result
@@ -1738,20 +1707,15 @@ fn sync_active_execution(
             let log = runtime.push_log(
                 LogLevel::Success,
                 &format!(
-                    "{} completed in Docker. exitCode={}, earned ${:.2}.",
+                    "{} completed in Docker. exitCode={}.",
                     completed_job.name,
                     runner_job
                         .result
                         .as_ref()
                         .and_then(|result| result.exit_code)
-                        .unwrap_or(0),
-                    completed_job.earnings
+                        .unwrap_or(0)
                 ),
             );
-            events.push(RuntimeEvent::EarningsUpdated(EarningsUpdateEvent {
-                event_type: "earnings_updated",
-                earnings: runtime.earnings.clone(),
-            }));
             events.push(RuntimeEvent::StatusChanged(WorkerStatusChangedEvent {
                 event_type: "worker_status_changed",
                 status: runtime.machine.status.clone(),
@@ -1772,14 +1736,13 @@ fn sync_active_execution(
         }
 
         let failure = runner_failure_message(&runner_job);
-        let _: Value = post_json(
+        let _: Value = patch_json(
             http,
             &format!("{}/api/jobs/{}/fail", runtime.api_url, execution.remote_job_id),
             auth_headers(&session)?,
             &json!({
-                "providerId": session.provider_id,
-                "error": limit_output(&failure),
-                "message": "Docker runner failed Python execution"
+                "machineId": session.provider_id,
+                "error": limit_output(&failure)
             }),
         )?;
 
@@ -1842,14 +1805,13 @@ fn cancel_remote_execution(
         &json!({}),
     );
 
-    let backend_fail_result: Result<Value, String> = post_json(
+    let backend_fail_result: Result<Value, String> = patch_json(
         http,
         &format!("{}/api/jobs/{}/fail", runtime.api_url, execution.remote_job_id),
         auth_headers(&session).unwrap_or_else(|_| HeaderMap::new()),
         &json!({
-            "providerId": session.provider_id,
-            "error": reason,
-            "message": reason
+            "machineId": session.provider_id,
+            "error": reason
         }),
     );
 
@@ -1866,90 +1828,20 @@ fn cancel_remote_execution(
     }
 }
 
-fn serialize_completion_result(runtime: &WorkerRuntime, runner_job: &RunnerJobRecord) -> String {
-    let payload = json!({
-        "providerMachine": runtime.machine.name,
-        "runnerJobId": runner_job.id,
-        "runnerState": runner_job.state,
-        "runnerType": runner_job.job_type,
-        "exitCode": runner_job.result.as_ref().and_then(|result| result.exit_code),
-        "durationMs": runner_job.result.as_ref().map(|result| result.duration_ms),
-        "startTime": runner_job.result.as_ref().map(|result| result.start_time.clone()),
-        "endTime": runner_job.result.as_ref().map(|result| result.end_time.clone()),
-        "stdout": runner_job
-            .result
-            .as_ref()
-            .map(|result| result.logs.stdout.clone())
-            .unwrap_or_else(|| runner_job.logs.stdout.clone()),
-        "stderr": runner_job
-            .result
-            .as_ref()
-            .map(|result| result.logs.stderr.clone())
-            .unwrap_or_else(|| runner_job.logs.stderr.clone()),
-        "artifacts": runner_job
-            .result
-            .as_ref()
-            .map(|result| result.artifact_paths.clone())
-            .unwrap_or_default(),
-        "truncated": runner_job.logs.truncated,
-        "error": runner_job.result.as_ref().and_then(|result| result.error.clone())
-    });
-
-    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string())
-}
-
 fn runner_request_for_marketplace_job(job: &RemoteMarketplaceJob) -> RunnerExecuteRequest {
-    if let Some(payload) = job
-        .runner_payload
-        .as_ref()
-        .and_then(parse_runner_payload)
-    {
-        return payload;
-    }
-
-    let safe_input = serde_json::to_string(&job.input).unwrap_or_else(|_| "\"\"".to_string());
-    let safe_title = serde_json::to_string(&job.title).unwrap_or_else(|_| "\"ComputeBNB job\"".to_string());
-    let safe_job_type = serde_json::to_string(&job.job_type).unwrap_or_else(|_| "\"unknown\"".to_string());
-    let script = format!(
-        concat!(
-            "import json\n",
-            "import pathlib\n",
-            "import hashlib\n",
-            "title = {title}\n",
-            "job_type = {job_type}\n",
-            "input_text = {input}\n",
-            "payload = {{\"title\": title, \"type\": job_type, \"input\": input_text}}\n",
-            "print(f'ComputeBNB job: {{title}}')\n",
-            "digest = hashlib.sha256(input_text.encode('utf-8')).hexdigest()[:12]\n",
-            "if job_type == 'embedding':\n",
-            "    result = {{\"embedding\": [round((idx + 1) / 10, 3) for idx in range(3)], \"digest\": digest, \"inputLength\": len(input_text)}}\n",
-            "elif job_type == 'image_caption':\n",
-            "    result = {{\"caption\": f'Caption for {{title}} (digest {{digest}})', \"digest\": digest}}\n",
-            "else:\n",
-            "    result = {{\"output\": f'Executed {{job_type}} for {{title}}', \"digest\": digest, \"input\": input_text}}\n",
-            "pathlib.Path('/workspace/artifacts').mkdir(exist_ok=True)\n",
-            "pathlib.Path('/workspace/artifacts/result.json').write_text(json.dumps(result, indent=2), encoding='utf-8')\n",
-            "print(json.dumps(result))\n"
-        ),
-        title = safe_title,
-        job_type = safe_job_type,
-        input = safe_input,
-    );
-
     RunnerExecuteRequest {
         id: Some(job.id.clone()),
         job_type: "python_script".to_string(),
         image: Some("computebnb/python-runner:local".to_string()),
         command: None,
-        script: Some(script),
+        script: Some(job.code.clone()),
         input: Some(json!({
             "jobId": job.id,
-            "title": job.title,
-            "jobType": job.job_type,
-            "input": job.input
+            "machineId": job.machine_id,
+            "filename": job.filename.clone().unwrap_or_else(|| "script.py".to_string())
         })),
         limits: Some(RunnerExecuteLimits {
-            timeout_ms: 30_000,
+            timeout_ms: job.timeout_seconds.unwrap_or(60).saturating_mul(1000),
             cpus: 1.0,
             memory_mb: 512,
             pids_limit: 128,
@@ -1958,31 +1850,8 @@ fn runner_request_for_marketplace_job(job: &RemoteMarketplaceJob) -> RunnerExecu
     }
 }
 
-fn parse_runner_payload(value: &Value) -> Option<RunnerExecuteRequest> {
-    serde_json::from_value::<RunnerExecuteRequest>(value.clone()).ok()
-}
-
-fn map_marketplace_job_type(job: &RemoteMarketplaceJob) -> JobType {
-    if let Some(payload_type) = job
-        .runner_payload
-        .as_ref()
-        .and_then(|payload| payload.get("type"))
-        .and_then(Value::as_str)
-    {
-        return match payload_type {
-            "inference" => JobType::BatchInference,
-            "benchmark_demo" => JobType::Simulation,
-            "python_script" => JobType::Compile,
-            _ => JobType::Compile,
-        };
-    }
-
-    match job.job_type.as_str() {
-        "embedding" | "image_caption" => JobType::BatchInference,
-        "shell_demo" => JobType::Compile,
-        "text_generation" => JobType::Simulation,
-        _ => JobType::Compile,
-    }
+fn map_marketplace_job_type() -> JobType {
+    JobType::Compile
 }
 
 fn build_progress_message(
@@ -2101,6 +1970,22 @@ fn post_json<T: DeserializeOwned, B: Serialize>(
     parse_json_response(response, url)
 }
 
+fn patch_json<T: DeserializeOwned, B: Serialize>(
+    http: &Client,
+    url: &str,
+    headers: HeaderMap,
+    body: &B,
+) -> Result<T, String> {
+    let response = http
+        .patch(url)
+        .headers(headers)
+        .json(body)
+        .send()
+        .map_err(|error| format!("PATCH {url} failed: {error}"))?;
+
+    parse_json_response(response, url)
+}
+
 fn get_json<T: DeserializeOwned>(
     http: &Client,
     url: &str,
@@ -2140,11 +2025,6 @@ fn parse_json_response<T: DeserializeOwned>(
 fn auth_headers(session: &ProviderSession) -> Result<HeaderMap, String> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    headers.insert(
-        AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {}", session.provider_token))
-            .map_err(|error| format!("invalid provider token header: {error}"))?,
-    );
     Ok(headers)
 }
 
@@ -2399,18 +2279,16 @@ mod tests {
     fn fallback_marketplace_job_becomes_python_script() {
         let job = RemoteMarketplaceJob {
             id: "job-1".to_string(),
-            title: "Hello".to_string(),
-            job_type: "shell_demo".to_string(),
-            input: "print hello".to_string(),
-            runner_payload: None,
-            budget_cents: Some(500),
-            provider_payout_cents: None,
+            machine_id: "machine-1".to_string(),
+            code: "print('hello')".to_string(),
+            filename: Some("hello.py".to_string()),
+            timeout_seconds: Some(30),
         };
 
         let request = runner_request_for_marketplace_job(&job);
 
         assert_eq!(request.job_type, "python_script");
-        assert!(request.script.unwrap_or_default().contains("ComputeBNB job"));
+        assert!(request.script.unwrap_or_default().contains("print('hello')"));
     }
 
     #[test]

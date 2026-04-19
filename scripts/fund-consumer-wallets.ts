@@ -18,7 +18,7 @@ import {
   sendAndConfirmTransaction,
 } from "@solana/web3.js";
 import { loadLocalEnv } from "./env";
-import Consumer from "../lib/models/Consumer";
+import User from "../lib/models/User";
 import { getSolanaConnection, keypairFromSecretKey } from "../lib/solana";
 
 loadLocalEnv();
@@ -86,8 +86,8 @@ async function main() {
   const master = keypairFromSecretKey(masterSecret);
 
   await connectMongo();
-  const consumers = await Consumer.find({ walletNetwork: "devnet" })
-    .select("name email walletAddress")
+  const consumers = await User.find({ role: "consumer", walletNetwork: "devnet" })
+    .select("displayName email walletAddress")
     .sort({ createdAt: 1 });
 
   console.log(`Master wallet: ${master.publicKey.toBase58()}`);
@@ -98,13 +98,19 @@ async function main() {
   let skipped = 0;
 
   for (const consumer of consumers) {
+    if (!consumer.walletAddress) {
+      skipped += 1;
+      continue;
+    }
+
+    const consumerName = consumer.displayName || consumer.email || "consumer";
     const to = new PublicKey(consumer.walletAddress);
     const balance = await connection.getBalance(to, "confirmed");
     const needed = targetLamports - balance;
 
     if (needed <= 0) {
       skipped += 1;
-      console.log(`Skip ${consumer.name}: ${balance / LAMPORTS_PER_SOL} SOL`);
+      console.log(`Skip ${consumerName}: ${balance / LAMPORTS_PER_SOL} SOL`);
       continue;
     }
 
@@ -129,7 +135,7 @@ async function main() {
 
     funded += 1;
     console.log(
-      `Funded ${consumer.name}: +${needed / LAMPORTS_PER_SOL} SOL -> ${consumer.walletAddress}`
+      `Funded ${consumerName}: +${needed / LAMPORTS_PER_SOL} SOL -> ${consumer.walletAddress}`
     );
     console.log(`Signature: ${signature}`);
   }

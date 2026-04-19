@@ -1,20 +1,22 @@
 import { NextResponse } from "next/server";
 import dbConnect from "@/lib/db";
-import { Provider, Job } from "@/lib/models";
+import { Job, Machine, User } from "@/lib/models";
 
 export async function GET() {
   try {
     await dbConnect();
 
-    const [providerCount, jobCount] = await Promise.all([
-      Provider.countDocuments(),
+    const [userCount, machineCount, jobCount] = await Promise.all([
+      User.countDocuments(),
+      Machine.countDocuments(),
       Job.countDocuments(),
     ]);
 
     return NextResponse.json({
       status: "ok",
       db: "connected",
-      providerCount,
+      userCount,
+      machineCount,
       jobCount,
       timestamp: new Date().toISOString(),
     });

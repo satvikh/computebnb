@@ -1,77 +1,82 @@
 import mongoose, { Document, Model, Schema, Types } from "mongoose";
 
 export type JobStatus = "queued" | "running" | "completed" | "failed";
-export type JobType = "python";
 
 export interface IJob extends Document {
-  title: string;
-  type: string;
-  status: JobStatus;
+  consumerUserId: Types.ObjectId;
   machineId: Types.ObjectId;
-  consumerId?: Types.ObjectId;
-  source: string;
+  status: JobStatus;
+  code: string;
+  filename?: string;
+  timeoutSeconds?: number;
   stdout: string;
   stderr: string;
-  exitCode?: number | null;
+  exitCode: number | null;
   budgetCents: number;
-  jobCostCents?: number;
-  providerPayoutCents?: number;
-  platformFeeCents?: number;
-  solanaPaymentLamports?: number;
-  solanaPaymentSignature?: string;
+  jobCostCents?: number | null;
+  providerPayoutCents?: number | null;
+  platformFeeCents?: number | null;
+  solanaPaymentLamports?: number | null;
+  solanaPaymentSignature?: string | null;
   solanaPaymentStatus?: "pending" | "settled" | "failed";
-  solanaCentsPerSol?: number;
+  solanaCentsPerSol?: number | null;
+  actualRuntimeSeconds?: number | null;
+  createdAt: Date;
   startedAt?: Date;
   completedAt?: Date;
-  actualRuntimeSeconds?: number;
-  proofHash?: string;
-  failureReason?: string;
-  error?: string;
-  createdAt: Date;
   updatedAt: Date;
 }
 
 const JobSchema = new Schema<IJob>(
   {
-    title: { type: String, required: true, trim: true },
-    type: { type: String, default: "python" },
+    consumerUserId: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
+    machineId: {
+      type: Schema.Types.ObjectId,
+      ref: "Machine",
+      required: true,
+      index: true,
+    },
     status: {
       type: String,
       enum: ["queued", "running", "completed", "failed"],
       default: "queued",
     },
-    machineId: { type: Schema.Types.ObjectId, ref: "Machine", required: true },
-    consumerId: { type: Schema.Types.ObjectId, ref: "Consumer" },
-    source: { type: String, required: true },
+    code: { type: String, required: true },
+    filename: { type: String, trim: true },
+    timeoutSeconds: { type: Number, min: 1 },
     stdout: { type: String, default: "" },
     stderr: { type: String, default: "" },
     exitCode: { type: Number, default: null },
     budgetCents: { type: Number, default: 500, min: 1 },
-    jobCostCents: { type: Number, min: 0 },
-    providerPayoutCents: { type: Number, min: 0 },
-    platformFeeCents: { type: Number, min: 0 },
-    solanaPaymentLamports: { type: Number, min: 0 },
-    solanaPaymentSignature: { type: String },
+    jobCostCents: { type: Number, min: 0, default: null },
+    providerPayoutCents: { type: Number, min: 0, default: null },
+    platformFeeCents: { type: Number, min: 0, default: null },
+    solanaPaymentLamports: { type: Number, min: 0, default: null },
+    solanaPaymentSignature: { type: String, default: null },
     solanaPaymentStatus: {
       type: String,
       enum: ["pending", "settled", "failed"],
       default: "pending",
     },
-    solanaCentsPerSol: { type: Number, min: 1 },
+    solanaCentsPerSol: { type: Number, min: 1, default: null },
+    actualRuntimeSeconds: { type: Number, min: 0, default: null },
     startedAt: { type: Date },
     completedAt: { type: Date },
-    actualRuntimeSeconds: { type: Number, min: 0 },
-    proofHash: { type: String },
-    failureReason: { type: String },
-    error: { type: String },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+    collection: "jobs",
+  }
 );
 
 JobSchema.index({ machineId: 1, status: 1, createdAt: 1 });
-JobSchema.index({ consumerId: 1, createdAt: -1 });
+JobSchema.index({ consumerUserId: 1, createdAt: -1 });
 JobSchema.index({ status: 1, createdAt: -1 });
-JobSchema.index({ createdAt: -1 });
 
 const Job: Model<IJob> =
   mongoose.models.Job || mongoose.model<IJob>("Job", JobSchema);

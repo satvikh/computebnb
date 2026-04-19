@@ -4,7 +4,7 @@ import { LedgerEntry, Machine } from "@/lib/models";
 export async function recordCompletedJobLedger(input: {
   jobId: Types.ObjectId | string;
   machineId: Types.ObjectId | string;
-  consumerId?: Types.ObjectId | string;
+  consumerUserId?: Types.ObjectId | string;
   budgetCents: number;
   providerPayoutCents: number;
   platformFeeCents: number;
@@ -19,15 +19,16 @@ export async function recordCompletedJobLedger(input: {
     {
       $setOnInsert: {
         jobId: input.jobId,
-        consumerId: input.consumerId,
+        machineId: input.machineId,
+        consumerUserId: input.consumerUserId,
         amountCents: input.budgetCents,
         solanaLamports: input.solanaLamports,
         solanaSignature: input.solanaSignature,
         fromWalletAddress: input.fromWalletAddress,
         toWalletAddress: input.toWalletAddress,
         solanaCentsPerSol: input.solanaCentsPerSol,
-        status: input.solanaSignature ? "settled" : "captured"
-      }
+        status: input.solanaSignature ? "settled" : "captured",
+      },
     },
     { upsert: true }
   );
@@ -38,15 +39,15 @@ export async function recordCompletedJobLedger(input: {
       $setOnInsert: {
         jobId: input.jobId,
         machineId: input.machineId,
-        consumerId: input.consumerId,
+        consumerUserId: input.consumerUserId,
         amountCents: input.providerPayoutCents,
         solanaLamports: input.solanaLamports,
         solanaSignature: input.solanaSignature,
         fromWalletAddress: input.fromWalletAddress,
         toWalletAddress: input.toWalletAddress,
         solanaCentsPerSol: input.solanaCentsPerSol,
-        status: input.solanaSignature ? "settled" : "pending"
-      }
+        status: input.solanaSignature ? "settled" : "pending",
+      },
     },
     { upsert: true }
   );
@@ -57,17 +58,17 @@ export async function recordCompletedJobLedger(input: {
       $setOnInsert: {
         jobId: input.jobId,
         machineId: input.machineId,
-        consumerId: input.consumerId,
+        consumerUserId: input.consumerUserId,
         amountCents: input.platformFeeCents,
-        status: "captured"
-      }
+        status: "captured",
+      },
     },
     { upsert: true }
   );
 
   if (payout.upsertedCount > 0) {
     await Machine.findByIdAndUpdate(input.machineId, {
-      $inc: { totalEarnedCents: input.providerPayoutCents }
+      $inc: { totalEarnedCents: input.providerPayoutCents },
     });
   }
 }

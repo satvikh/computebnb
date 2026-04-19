@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getDbUnavailablePayload, getJobDetail } from "@/lib/marketplace";
+import { getJobById } from "@/lib/mvp";
 
 export async function GET(
   _request: Request,
@@ -7,15 +7,12 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const detail = await getJobDetail(id);
-    if (!detail) {
+    const job = await getJobById(id);
+    if (!job) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
     }
-    return NextResponse.json(detail);
-  } catch (error) {
-    if (error instanceof Error && error.message.includes("MONGODB_URI")) {
-      return NextResponse.json(getDbUnavailablePayload(), { status: 503 });
-    }
+    return NextResponse.json({ job });
+  } catch {
     return NextResponse.json({ error: "Failed to load job" }, { status: 500 });
   }
 }

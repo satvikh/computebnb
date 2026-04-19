@@ -21,7 +21,12 @@ export type WorkerEventName = (typeof WORKER_EVENT_NAMES)[keyof typeof WORKER_EV
 const eventNames = Object.values(WORKER_EVENT_NAMES);
 
 function hasTauriRuntime() {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  const maybeWindow = typeof window === "undefined" ? null : (window as typeof window & { __TAURI_INTERNALS__?: unknown });
+  return (
+    maybeWindow !== null &&
+    typeof maybeWindow.__TAURI_INTERNALS__ === "object" &&
+    maybeWindow.__TAURI_INTERNALS__ !== null
+  );
 }
 
 export async function listenToTauriWorkerEvents(onEvent: (event: WorkerEvent) => void): Promise<() => void> {
@@ -29,18 +34,22 @@ export async function listenToTauriWorkerEvents(onEvent: (event: WorkerEvent) =>
     return () => undefined;
   }
 
-  const { listen } = await import("@tauri-apps/api/event");
-  const unlistenFns = await Promise.all(
-    eventNames.map((eventName) =>
-      listen<WorkerEvent>(eventName, (event) => {
-        onEvent(event.payload);
-      })
-    )
-  );
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    const unlistenFns = await Promise.all(
+      eventNames.map((eventName) =>
+        listen<WorkerEvent>(eventName, (event) => {
+          onEvent(event.payload);
+        })
+      )
+    );
 
-  return () => {
-    for (const unlisten of unlistenFns) {
-      unlisten();
-    }
-  };
+    return () => {
+      for (const unlisten of unlistenFns) {
+        unlisten();
+      }
+    };
+  } catch {
+    return () => undefined;
+  }
 }

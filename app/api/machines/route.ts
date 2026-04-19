@@ -1,14 +1,11 @@
 import { NextResponse } from "next/server";
-import { getDbUnavailablePayload, listMachinesSummary } from "@/lib/marketplace";
+import { listMarketplaceMachines } from "@/lib/mvp";
 
 export async function GET() {
   try {
-    const machines = await listMachinesSummary();
+    const machines = await listMarketplaceMachines();
     return NextResponse.json({ machines });
-  } catch (error) {
-    if (error instanceof Error && error.message.includes("MONGODB_URI")) {
-      return NextResponse.json(getDbUnavailablePayload(), { status: 503 });
-    }
+  } catch {
     return NextResponse.json({ error: "Failed to load machines" }, { status: 500 });
   }
 }

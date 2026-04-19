@@ -17,7 +17,12 @@ export const WORKER_COMMANDS = {
 } as const;
 
 function hasTauriRuntime() {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  const maybeWindow = typeof window === "undefined" ? null : (window as typeof window & { __TAURI_INTERNALS__?: unknown });
+  return (
+    maybeWindow !== null &&
+    typeof maybeWindow.__TAURI_INTERNALS__ === "object" &&
+    maybeWindow.__TAURI_INTERNALS__ !== null
+  );
 }
 
 async function invokeCommand<T>(command: string, args?: Record<string, unknown>): Promise<T | null> {
@@ -25,8 +30,12 @@ async function invokeCommand<T>(command: string, args?: Record<string, unknown>)
     return null;
   }
 
-  const { invoke } = await import("@tauri-apps/api/core");
-  return invoke<T>(command, args);
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return await invoke<T>(command, args);
+  } catch {
+    return null;
+  }
 }
 
 export async function invokeDetectMachine() {
