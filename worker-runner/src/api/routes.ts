@@ -27,6 +27,16 @@ export function installRoutes(app: Express, service: RunnerService, executor: Ex
     }
   });
 
+  router.post("/jobs/execute-sync", async (request, response) => {
+    try {
+      const job = await service.executeSync(parseJobRequest(request.body));
+      response.status(200).json({ job });
+    } catch (error) {
+      const status = error instanceof ZodError ? 400 : 422;
+      response.status(status).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   router.get("/jobs/:id", (request, response) => {
     const job = service.get(request.params.id);
     if (!job) {

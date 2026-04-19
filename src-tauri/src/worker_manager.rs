@@ -1610,22 +1610,34 @@ fn poll_for_assignment(http: &Client, runtime: &mut WorkerRuntime) -> Result<Vec
     let runner_request = runner_request_for_marketplace_job(&job);
     let runner_response: RunnerExecuteResponse = post_json(
         http,
-        &format!("{}/jobs/execute", runtime.runner_url),
+        &format!("{}/jobs/execute-sync", runtime.runner_url),
         runner_headers()?,
         &runner_request,
     )?;
 
+    runtime.note_network_recovery();
+    runtime.machine.status = WorkerStatus::Busy;
+
     let started_at = now();
-    let estimated_completion_at = (Utc::now() + ChronoDuration::seconds(30))
-        .to_rfc3339_opts(SecondsFormat::Millis, true);
-    let ui_job = Job {
+    let estimated_completion_at = runner_response
+        .job
+        .result
+        .as_ref()
+        .map(|result| result.end_time.clone())
+        .or_else(|| {
+            Some(
+                (Utc::now() + ChronoDuration::seconds(30))
+                    .to_rfc3339_opts(SecondsFormat::Millis, true),
+            )
+        });
+    let mut ui_job = Job {
         id: job.id.clone(),
         name: job.filename.clone().unwrap_or_else(|| "script.py".to_string()),
         job_type: map_marketplace_job_type(),
         status: JobStatus::Running,
         progress: initial_progress_for_state(&runner_response.job.state),
         started_at: Some(started_at.clone()),
-        estimated_completion_at: Some(estimated_completion_at),
+        estimated_completion_at,
         earnings: 0.0,
         cpu_usage: clamp(runtime.settings.cpu_limit * 0.72, 18.0, runtime.settings.cpu_limit),
         memory_usage: 48.0,
@@ -1634,30 +1646,15 @@ fn poll_for_assignment(http: &Client, runtime: &mut WorkerRuntime) -> Result<Vec
         execution_error: None,
     };
 
-    runtime.active_execution = Some(ActiveExecution {
-        remote_job_id: job.id.clone(),
-        runner_job_id: runner_response.job.id.clone(),
-        last_stdout_len: runner_response.job.logs.stdout.len(),
-        last_stderr_len: runner_response.job.logs.stderr.len(),
-        last_state: runner_response.job.state.clone(),
-    });
-    runtime.active_job = Some(ui_job.clone());
-    runtime.machine.status = WorkerStatus::Busy;
-    runtime.note_network_recovery();
-
     let assign_log = runtime.push_log(
         LogLevel::Success,
         &format!(
-            "Backend assigned {}. Docker runner accepted job {} for execution.",
-            ui_job.name, runner_response.job.id
+            "Backend assigned {}. Docker runner completed job {} with state {}.",
+            ui_job.name, runner_response.job.id, runner_response.job.state
         ),
     );
-    let progress_log = runtime.push_log(
-        LogLevel::Info,
-        &format!("Job {} is running in Docker image {}.", job.id, runner_response.job.image),
-    );
 
-    Ok(vec![
+    let mut events = vec![
         RuntimeEvent::StatusChanged(WorkerStatusChangedEvent {
             event_type: "worker_status_changed",
             status: WorkerStatus::Busy,
@@ -1668,21 +1665,109 @@ fn poll_for_assignment(http: &Client, runtime: &mut WorkerRuntime) -> Result<Vec
             event_type: "job_assigned",
             job: ui_job.clone(),
         }),
-        RuntimeEvent::JobProgress(JobProgressEvent {
-            event_type: "job_progress",
-            job: ui_job,
-        }),
         RuntimeEvent::LogEmitted(ActivityLogEvent {
             event_type: "log_emitted",
             log: assign_log,
             job_id: Some(job.id.clone()),
         }),
-        RuntimeEvent::LogEmitted(ActivityLogEvent {
-            event_type: "log_emitted",
-            log: progress_log,
-            job_id: Some(job.id),
-        }),
-    ])
+    ];
+
+    let stdout = runner_response
+        .job
+        .result
+        .as_ref()
+        .map(|result| result.logs.stdout.clone())
+        .unwrap_or_else(|| runner_response.job.logs.stdout.clone());
+    let stderr = runner_response
+        .job
+        .result
+        .as_ref()
+        .map(|result| result.logs.stderr.clone())
+        .unwrap_or_else(|| runner_response.job.logs.stderr.clone());
+    let exit_code = runner_response
+        .job
+        .result
+        .as_ref()
+        .and_then(|result| result.exit_code)
+        .unwrap_or(if runner_response.job.error.is_some() { 1 } else { 0 });
+
+    if is_successful_runner_completion(&runner_response.job) {
+        let _: Value = patch_json(
+            http,
+            &format!("{}/api/jobs/{}/complete", runtime.api_url, job.id),
+            auth_headers(&session)?,
+            &json!({
+                "machineId": session.provider_id,
+                "stdout": stdout,
+                "stderr": stderr,
+                "exitCode": exit_code
+            }),
+        )?;
+
+        ui_job.status = JobStatus::Completed;
+        ui_job.progress = 100.0;
+        ui_job.execution_output = (!stdout.trim().is_empty()).then(|| limit_output(&stdout));
+        ui_job.execution_error = (!stderr.trim().is_empty()).then(|| limit_output(&stderr));
+        runtime.machine.status = if runtime.pause_requested {
+            WorkerStatus::Paused
+        } else {
+            WorkerStatus::Idle
+        };
+        runtime.recent_jobs.insert(0, ui_job.clone());
+        runtime.recent_jobs.truncate(8);
+
+        events.push(RuntimeEvent::StatusChanged(WorkerStatusChangedEvent {
+            event_type: "worker_status_changed",
+            status: runtime.machine.status.clone(),
+            last_heartbeat_at: runtime.machine.last_heartbeat_at.clone(),
+            uptime_seconds: runtime.machine.uptime_seconds,
+        }));
+        events.push(RuntimeEvent::JobCompleted(JobCompletedEvent {
+            event_type: "job_completed",
+            job: ui_job,
+            recent_jobs: runtime.recent_jobs.clone(),
+        }));
+    } else {
+        let failure = runner_failure_message(&runner_response.job);
+        let _: Value = patch_json(
+            http,
+            &format!("{}/api/jobs/{}/fail", runtime.api_url, job.id),
+            auth_headers(&session)?,
+            &json!({
+                "machineId": session.provider_id,
+                "error": limit_output(&failure),
+                "stdout": stdout,
+                "stderr": if stderr.trim().is_empty() { failure.clone() } else { stderr.clone() },
+                "exitCode": exit_code
+            }),
+        )?;
+
+        ui_job.status = JobStatus::Failed;
+        ui_job.progress = 100.0;
+        ui_job.execution_output = (!stdout.trim().is_empty()).then(|| limit_output(&stdout));
+        ui_job.execution_error = Some(limit_output(&failure));
+        runtime.machine.status = if runtime.pause_requested {
+            WorkerStatus::Paused
+        } else {
+            WorkerStatus::Idle
+        };
+        runtime.recent_jobs.insert(0, ui_job.clone());
+        runtime.recent_jobs.truncate(8);
+
+        events.push(RuntimeEvent::StatusChanged(WorkerStatusChangedEvent {
+            event_type: "worker_status_changed",
+            status: runtime.machine.status.clone(),
+            last_heartbeat_at: runtime.machine.last_heartbeat_at.clone(),
+            uptime_seconds: runtime.machine.uptime_seconds,
+        }));
+        events.push(RuntimeEvent::JobCompleted(JobCompletedEvent {
+            event_type: "job_completed",
+            job: ui_job,
+            recent_jobs: runtime.recent_jobs.clone(),
+        }));
+    }
+
+    Ok(events)
 }
 
 fn sync_active_execution(

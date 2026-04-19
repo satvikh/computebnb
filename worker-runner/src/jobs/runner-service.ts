@@ -1,5 +1,5 @@
 import type { RunnerConfig } from "../config.js";
-import type { Executor, JobRequest, JobRecord, NormalizedJob } from "../types.js";
+import type { Executor, JobRecord, JobRequest, JobState, NormalizedJob } from "../types.js";
 import { JobStore } from "./job-store.js";
 import { normalizeJob, toJobRecord } from "./registry.js";
 
@@ -36,6 +36,38 @@ export class RunnerService {
 
   get(id: string) {
     return this.store.get(id);
+  }
+
+  async executeSync(request: JobRequest): Promise<JobRecord> {
+    const job = normalizeJob(request, {
+      timeoutMs: this.config.defaultTimeoutMs,
+      logLimitBytes: this.config.maxLogBytes,
+      allowCustomCommands: this.config.allowCustomCommands
+    });
+
+    let state: JobState = "queued";
+    const result = await this.executor.execute(job, {
+      onState: (nextState) => {
+        state = nextState;
+      },
+      onStdout: () => undefined,
+      onStderr: () => undefined
+    });
+
+    return {
+      ...toJobRecord(job),
+      state: result.error
+        ? result.error === "Timed out"
+          ? "timed_out"
+          : "failed"
+        : state === "queued"
+          ? "completed"
+          : state,
+      updatedAt: result.endTime,
+      logs: result.logs,
+      result,
+      error: result.error
+    };
   }
 
   async cancel(id: string) {
