@@ -5,7 +5,8 @@ const navItems = [
   { href: "/dashboard", label: "Overview" },
   { href: "/providers", label: "Machines" },
   { href: "/jobs", label: "Jobs" },
-  { href: "/jobs/new", label: "Submit" }
+  { href: "/jobs/new", label: "Submit" },
+  { href: "/requester", label: "Requester" }
 ];
 
 export function MarketplaceShell({

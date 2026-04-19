@@ -16,11 +16,16 @@ export class JobPoller {
   private timer: NodeJS.Timeout | undefined;
   private busy = false;
   private remoteJobId: string | undefined;
+  private providerId: string | undefined;
+  private providerToken: string | undefined;
 
   constructor(
     private readonly config: RunnerConfig,
     private readonly service: RunnerService
-  ) {}
+  ) {
+    this.providerId = config.providerId;
+    this.providerToken = config.providerToken;
+  }
 
   start() {
     if (!this.config.pollEnabled) {
@@ -28,7 +33,9 @@ export class JobPoller {
       return;
     }
 
-    void this.tick();
+    void this.bootstrap().then(() => this.tick()).catch((error) => {
+      console.warn("[poller] bootstrap failed", error instanceof Error ? error.message : error);
+    });
     this.timer = setInterval(() => void this.tick(), this.config.pollIntervalMs);
   }
 
@@ -41,15 +48,18 @@ export class JobPoller {
     this.busy = true;
 
     try {
+      await this.bootstrap();
+      if (!this.providerId) return;
+
       const response = await this.post<RemotePollResponse>("/api/worker/poll", {
-        providerId: this.config.providerId
+        providerId: this.providerId
       });
 
       if (!response.job) return;
 
       const payload = this.toLocalJob(response.job);
       await this.post(`/api/jobs/${response.job.id}/start`, {
-        providerId: this.config.providerId
+        providerId: this.providerId
       });
       const submitted = this.service.submit(payload, {
         onComplete: async (job) => {
@@ -74,7 +84,7 @@ export class JobPoller {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...(this.config.providerToken ? { authorization: `Bearer ${this.config.providerToken}` } : {})
+        ...(this.providerToken ? { authorization: `Bearer ${this.providerToken}` } : {})
       },
       body: JSON.stringify(body)
     });
@@ -84,6 +94,41 @@ export class JobPoller {
     }
 
     return response.json() as Promise<T>;
+  }
+
+  private async bootstrap() {
+    if (this.providerId && this.providerToken) return;
+
+    if (this.providerId && !this.providerToken) {
+      console.warn("[poller] PROVIDER_ID is set but PROVIDER_TOKEN is missing; remote polling requires a token.");
+      return;
+    }
+
+    const response = await fetch(`${this.config.apiBaseUrl}/api/providers/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: process.env.PROVIDER_NAME || "Local Docker Provider",
+        capabilities: ["cpu", "docker"],
+        hourlyRateCents: 250
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`/api/providers/register returned ${response.status}: ${await response.text()}`);
+    }
+
+    const body = (await response.json()) as {
+      provider?: { id?: string; token?: string; name?: string };
+    };
+
+    if (!body.provider?.id || !body.provider?.token) {
+      throw new Error("Provider registration did not return an id and token.");
+    }
+
+    this.providerId = body.provider.id;
+    this.providerToken = body.provider.token;
+    console.log(`[poller] registered provider ${body.provider.name ?? this.providerId} (${this.providerId})`);
   }
 
   private toLocalJob(job: NonNullable<RemotePollResponse["job"]>): JobRequest {
@@ -104,7 +149,7 @@ export class JobPoller {
   private async reportRemoteResult(remoteJobId: string, job: { state: string; result?: unknown; error?: string }) {
     if (job.state === "completed") {
       await this.post(`/api/jobs/${remoteJobId}/complete`, {
-        providerId: this.config.providerId,
+        providerId: this.providerId,
         result: JSON.stringify(job.result ?? {}, null, 2),
         message: "Docker worker-runner completed execution"
       });
@@ -112,7 +157,7 @@ export class JobPoller {
     }
 
     await this.post(`/api/jobs/${remoteJobId}/fail`, {
-      providerId: this.config.providerId,
+      providerId: this.providerId,
       error: job.error ?? `Runner ended in ${job.state}`,
       message: "Docker worker-runner failed execution"
     });

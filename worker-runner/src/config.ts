@@ -5,7 +5,7 @@ export interface RunnerConfig {
   port: number;
   pollEnabled: boolean;
   apiBaseUrl: string;
-  providerId: string;
+  providerId?: string;
   providerToken?: string;
   pollIntervalMs: number;
   workspaceRoot: string;
@@ -32,7 +32,7 @@ export function loadConfig(): RunnerConfig {
     port: int(process.env.PORT, 4317),
     pollEnabled: bool(process.env.POLL_ENABLED, false),
     apiBaseUrl: process.env.API_BASE_URL ?? "http://localhost:3000",
-    providerId: process.env.PROVIDER_ID ?? "local-demo-provider",
+    providerId: process.env.PROVIDER_ID || undefined,
     providerToken: process.env.PROVIDER_TOKEN || undefined,
     pollIntervalMs: int(process.env.POLL_INTERVAL_MS, 5000),
     workspaceRoot: path.resolve(process.env.WORKSPACE_ROOT ?? "./workspaces"),

@@ -42,10 +42,9 @@ impl WorkerManager {
     }
 
     fn snapshot(&self) -> WorkerRuntimeSnapshot {
-        self.runtime
-            .lock()
-            .expect("worker runtime poisoned")
-            .snapshot()
+        let mut runtime = self.runtime.lock().expect("worker runtime poisoned");
+        runtime.refresh_local_diagnostics();
+        runtime.snapshot()
     }
 
     fn emit_snapshot(&self, app: &AppHandle) {
@@ -320,8 +319,8 @@ impl WorkerRuntime {
                 id: "node-local-preview".to_string(),
                 name: local_machine_name(),
                 os: local_os_name(),
-                cpu: "Local CPU provider".to_string(),
-                memory_gb: 16,
+                cpu: local_cpu_name(),
+                memory_gb: local_memory_gb(),
                 status: WorkerStatus::Offline,
                 charging: true,
                 cpu_limit: settings.cpu_limit,
@@ -331,14 +330,7 @@ impl WorkerRuntime {
                 last_heartbeat_at: None,
                 uptime_seconds: 0,
             },
-            metrics: ResourceMetrics {
-                cpu_usage: 6.0,
-                memory_usage: 28.0,
-                battery_percent: 86.0,
-                temperature_c: 41.0,
-                network_mbps: 124.0,
-                heartbeat_latency_ms: 0,
-            },
+            metrics: local_resource_metrics(0),
             active_job: None,
             recent_jobs: seed_recent_jobs(),
             earnings: Earnings {
@@ -403,6 +395,15 @@ impl WorkerRuntime {
         }
     }
 
+    fn refresh_local_diagnostics(&mut self) {
+        self.machine.name = local_machine_name();
+        self.machine.os = local_os_name();
+        self.machine.cpu = local_cpu_name();
+        self.machine.memory_gb = local_memory_gb();
+        self.metrics = local_resource_metrics(self.metrics.heartbeat_latency_ms);
+        self.machine.charging = local_battery_charging().unwrap_or(self.machine.charging);
+    }
+
     fn update_settings(&mut self, settings: WorkerSettings) -> Vec<RuntimeEvent> {
         self.settings = settings;
         self.machine.cpu_limit = self.settings.cpu_limit;
@@ -439,19 +440,7 @@ impl WorkerRuntime {
             self.machine.status,
             WorkerStatus::Offline | WorkerStatus::Paused | WorkerStatus::Error
         ) {
-            self.metrics.cpu_usage =
-                clamp(self.metrics.cpu_usage + self.range(-2.0, 2.0), 2.0, 14.0);
-            self.metrics.memory_usage = clamp(
-                self.metrics.memory_usage + self.range(-1.0, 1.0),
-                20.0,
-                34.0,
-            );
-            self.metrics.battery_percent = clamp(self.metrics.battery_percent - 0.01, 1.0, 100.0);
-            self.metrics.temperature_c = clamp(
-                self.metrics.temperature_c + self.range(-1.0, 1.0),
-                37.0,
-                45.0,
-            );
+            self.refresh_local_diagnostics();
             return vec![RuntimeEvent::MetricsUpdated(MetricsUpdateEvent {
                 event_type: "metrics_updated",
                 metrics: self.metrics.clone(),
@@ -462,6 +451,8 @@ impl WorkerRuntime {
         let heartbeat_at = now();
         let latency = self.range(18.0, 46.0).round() as u32;
         self.machine.last_heartbeat_at = Some(heartbeat_at.clone());
+        self.metrics.heartbeat_latency_ms = latency;
+        self.refresh_local_diagnostics();
         self.metrics.heartbeat_latency_ms = latency;
 
         let mut events = vec![RuntimeEvent::Heartbeat(HeartbeatEvent {
@@ -483,14 +474,6 @@ impl WorkerRuntime {
                 LogLevel::Success,
                 &format!("Scheduler assigned {}.", job.name),
             );
-
-            self.metrics.cpu_usage = clamp(
-                job.cpu_usage + self.range(0.0, 8.0),
-                35.0,
-                self.settings.cpu_limit,
-            );
-            self.metrics.memory_usage = clamp(job.memory_usage + self.range(0.0, 5.0), 28.0, 72.0);
-            self.metrics.temperature_c = clamp(self.metrics.temperature_c + 2.0, 39.0, 72.0);
 
             events.push(RuntimeEvent::StatusChanged(WorkerStatusChangedEvent {
                 event_type: "worker_status_changed",
@@ -516,10 +499,8 @@ impl WorkerRuntime {
 
         if self.active_job.is_none() {
             self.machine.status = WorkerStatus::Idle;
-            self.metrics.cpu_usage = clamp(12.0 + self.range(0.0, 10.0), 8.0, 24.0);
-            self.metrics.memory_usage = clamp(29.0 + self.range(0.0, 8.0), 24.0, 42.0);
-            self.metrics.temperature_c = clamp(40.0 + self.range(0.0, 5.0), 38.0, 50.0);
-            self.metrics.network_mbps = clamp(105.0 + self.range(0.0, 44.0), 60.0, 180.0);
+            self.refresh_local_diagnostics();
+            self.metrics.heartbeat_latency_ms = latency;
             events.push(RuntimeEvent::StatusChanged(WorkerStatusChangedEvent {
                 event_type: "worker_status_changed",
                 status: WorkerStatus::Idle,
@@ -597,12 +578,8 @@ impl WorkerRuntime {
             }
         }
 
-        self.metrics.cpu_usage = cpu_usage;
-        self.metrics.memory_usage = memory_usage;
-        self.metrics.battery_percent = clamp(self.metrics.battery_percent - 0.03, 1.0, 100.0);
-        self.metrics.temperature_c =
-            clamp(43.0 + cpu_usage / 5.0 + self.range(0.0, 3.0), 40.0, 78.0);
-        self.metrics.network_mbps = clamp(90.0 + self.range(0.0, 80.0), 48.0, 220.0);
+        self.refresh_local_diagnostics();
+        self.metrics.heartbeat_latency_ms = latency;
 
         if let Some((job_id, log)) = progress_log {
             events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
@@ -902,7 +879,7 @@ pub fn detect_machine(app: AppHandle, manager: tauri::State<'_, WorkerManager>) 
     let machine = {
         let mut runtime = manager.runtime.lock().expect("worker runtime poisoned");
         runtime.machine.name = local_machine_name();
-        runtime.machine.os = local_os_name();
+        runtime.refresh_local_diagnostics();
         runtime.machine.clone()
     };
     emit_worker_event(
@@ -992,8 +969,7 @@ pub fn stop_worker(
             job.status = JobStatus::Paused;
         }
         runtime.machine.uptime_seconds = 0;
-        runtime.metrics.cpu_usage = 5.0;
-        runtime.metrics.memory_usage = 25.0;
+        runtime.refresh_local_diagnostics();
         runtime.metrics.heartbeat_latency_ms = 0;
         let mut events = runtime.set_status(WorkerStatus::Offline);
         let log = runtime.push_log(LogLevel::Warning, "Worker stopped by owner.");
@@ -1100,8 +1076,7 @@ pub fn emergency_stop(
         let mut runtime = manager.runtime.lock().expect("worker runtime poisoned");
         runtime.active_job = None;
         runtime.machine.uptime_seconds = 0;
-        runtime.metrics.cpu_usage = 3.0;
-        runtime.metrics.memory_usage = 22.0;
+        runtime.refresh_local_diagnostics();
         runtime.metrics.heartbeat_latency_ms = 0;
         let mut events = runtime.set_status(WorkerStatus::Offline);
         let log = runtime.push_log(
@@ -1156,7 +1131,10 @@ pub fn start_sandbox_runner(
     }
 
     let worker_dir = worker_runner_dir()?;
-    let child = spawn_shell("npm run start", Some(worker_dir.clone()))?;
+    let child = spawn_shell(
+        "POLL_ENABLED=true API_BASE_URL=http://localhost:3000 npm run start",
+        Some(worker_dir.clone()),
+    )?;
     {
         let mut child_guard = manager
             .sandbox_runner
@@ -1170,7 +1148,7 @@ pub fn start_sandbox_runner(
         let log = runtime.push_log(
             LogLevel::Success,
             &format!(
-                "Docker sandbox runner started from {}.",
+                "Docker sandbox runner started from {} and will poll the local marketplace for jobs.",
                 worker_dir.to_string_lossy()
             ),
         );
@@ -1508,6 +1486,148 @@ fn local_os_name() -> String {
         "linux" => "Linux".to_string(),
         other => other.to_string(),
     }
+}
+
+fn local_cpu_name() -> String {
+    if cfg!(target_os = "macos") {
+        return run_shell("sysctl -n machdep.cpu.brand_string", None)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "Apple local CPU".to_string());
+    }
+
+    if cfg!(target_os = "linux") {
+        return run_shell("awk -F: '/model name/ {print $2; exit}' /proc/cpuinfo", None)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "Linux local CPU".to_string());
+    }
+
+    std::env::var("PROCESSOR_IDENTIFIER").unwrap_or_else(|_| "Local CPU provider".to_string())
+}
+
+fn local_memory_gb() -> u32 {
+    if cfg!(target_os = "macos") {
+        if let Ok(bytes) = run_shell("sysctl -n hw.memsize", None).and_then(|value| {
+            value
+                .trim()
+                .parse::<f64>()
+                .map_err(|error| format!("unable to parse memory: {error}"))
+        }) {
+            return ((bytes / 1024.0 / 1024.0 / 1024.0).round() as u32).max(1);
+        }
+    }
+
+    if cfg!(target_os = "linux") {
+        if let Ok(kb) = run_shell("awk '/MemTotal/ {print $2}' /proc/meminfo", None).and_then(|value| {
+            value
+                .trim()
+                .parse::<f64>()
+                .map_err(|error| format!("unable to parse memory: {error}"))
+        }) {
+            return ((kb / 1024.0 / 1024.0).round() as u32).max(1);
+        }
+    }
+
+    0
+}
+
+fn local_resource_metrics(heartbeat_latency_ms: u32) -> ResourceMetrics {
+    ResourceMetrics {
+        cpu_usage: local_cpu_usage_percent().unwrap_or(0.0),
+        memory_usage: local_memory_usage_percent().unwrap_or(0.0),
+        battery_percent: local_battery_percent().unwrap_or(0.0),
+        temperature_c: 0.0,
+        network_mbps: 0.0,
+        heartbeat_latency_ms,
+    }
+}
+
+fn local_cpu_usage_percent() -> Option<f64> {
+    if cfg!(target_os = "macos") || cfg!(target_os = "linux") {
+        let total_cpu = run_shell("ps -A -o %cpu | awk 'NR>1 {s+=$1} END {print s+0}'", None)
+            .ok()?
+            .parse::<f64>()
+            .ok()?;
+        let cores = std::thread::available_parallelism().ok()?.get() as f64;
+        return Some(clamp(total_cpu / cores, 0.0, 100.0));
+    }
+
+    None
+}
+
+fn local_memory_usage_percent() -> Option<f64> {
+    if cfg!(target_os = "macos") {
+        let total_bytes = run_shell("sysctl -n hw.memsize", None)
+            .ok()?
+            .parse::<f64>()
+            .ok()?;
+        let vm_stat = run_shell("vm_stat", None).ok()?;
+        let page_size = parse_vm_stat_page_size(&vm_stat).unwrap_or(16384.0);
+        let used_pages = parse_vm_stat_pages(&vm_stat, "Pages active:")
+            + parse_vm_stat_pages(&vm_stat, "Pages wired down:")
+            + parse_vm_stat_pages(&vm_stat, "Pages occupied by compressor:");
+        return Some(clamp((used_pages * page_size / total_bytes) * 100.0, 0.0, 100.0));
+    }
+
+    if cfg!(target_os = "linux") {
+        let usage = run_shell(
+            "awk '/MemTotal/ {total=$2} /MemAvailable/ {available=$2} END {print ((total-available)/total)*100}' /proc/meminfo",
+            None,
+        )
+        .ok()?
+        .parse::<f64>()
+        .ok()?;
+        return Some(clamp(usage, 0.0, 100.0));
+    }
+
+    None
+}
+
+fn parse_vm_stat_page_size(value: &str) -> Option<f64> {
+    value
+        .lines()
+        .next()?
+        .split_whitespace()
+        .find_map(|part| part.parse::<f64>().ok())
+}
+
+fn parse_vm_stat_pages(value: &str, key: &str) -> f64 {
+    value
+        .lines()
+        .find(|line| line.starts_with(key))
+        .and_then(|line| {
+            line.split(':')
+                .nth(1)?
+                .trim()
+                .trim_end_matches('.')
+                .replace('.', "")
+                .parse::<f64>()
+                .ok()
+        })
+        .unwrap_or(0.0)
+}
+
+fn local_battery_percent() -> Option<f64> {
+    if cfg!(target_os = "macos") {
+        return run_shell("pmset -g batt | grep -Eo '[0-9]+%' | head -1 | tr -d '%'", None)
+            .ok()?
+            .parse::<f64>()
+            .ok()
+            .map(|value| clamp(value, 0.0, 100.0));
+    }
+
+    None
+}
+
+fn local_battery_charging() -> Option<bool> {
+    if cfg!(target_os = "macos") {
+        let value = run_shell("pmset -g batt", None).ok()?;
+        return Some(value.contains("AC Power") || value.contains("charging"));
+    }
+
+    None
 }
 
 fn log(id: &str, level: LogLevel, message: &str) -> JobLog {

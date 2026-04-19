@@ -24,12 +24,22 @@ export function SandboxRunnerPanel() {
   const [job, setJob] = React.useState<SandboxJob | null>(null);
   const [busy, setBusy] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  const [terminal, setTerminal] = React.useState<Array<{ at: string; level: "info" | "success" | "error"; message: string }>>([]);
+
+  function writeLog(level: "info" | "success" | "error", message: string) {
+    setTerminal((items) => [{ at: new Date().toISOString(), level, message }, ...items].slice(0, 10));
+  }
 
   const refresh = React.useCallback(async () => {
     setError(null);
+    writeLog("info", "Checking Docker and sandbox runner status.");
     const [dockerHealth, runnerStatus] = await Promise.all([checkDockerHealth(), getSandboxRunnerStatus()]);
     setDocker(dockerHealth);
     setRunner(runnerStatus);
+    writeLog(
+      dockerHealth.ok && runnerStatus.running ? "success" : "info",
+      `Docker is ${dockerHealth.ok ? "ready" : "not available"}; runner is ${runnerStatus.running ? "running" : "stopped"}.`
+    );
   }, []);
 
   React.useEffect(() => {
@@ -53,8 +63,11 @@ export function SandboxRunnerPanel() {
     setError(null);
     try {
       await action();
+      writeLog("success", `${label} completed successfully.`);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Sandbox action failed.");
+      const message = reason instanceof Error ? reason.message : "Sandbox action failed.";
+      setError(message);
+      writeLog("error", `${label} failed: ${message}`);
     } finally {
       setBusy(null);
     }
@@ -168,6 +181,18 @@ export function SandboxRunnerPanel() {
           ) : null}
         </div>
       ) : null}
+
+      <div className="mt-5 rounded-md border border-white/10 bg-black/30 p-3">
+        <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.2em] text-zinc-500">Terminal log</p>
+        <div className="space-y-1 font-mono text-xs">
+          {terminal.map((item, index) => (
+            <div key={`${item.at}-${index}`} className={item.level === "error" ? "text-rose-200" : item.level === "success" ? "text-emerald-200" : "text-zinc-300"}>
+              {new Date(item.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })} - {item.message}
+            </div>
+          ))}
+          {!terminal.length ? <div className="text-zinc-500">No sandbox actions yet.</div> : null}
+        </div>
+      </div>
     </section>
   );
 }

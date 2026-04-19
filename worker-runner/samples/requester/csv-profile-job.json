@@ -1,0 +1,10 @@
+{
+  "type": "python_script",
+  "script": "import csv\nfrom io import StringIO\n\nraw = \"\"\"name,region,revenue,users\nacme,west,18200,410\nbravo,east,9400,205\ncedar,west,15100,338\ndelta,south,12150,284\n\"\"\"\n\nrows = list(csv.DictReader(StringIO(raw)))\nrevenues = [int(row[\"revenue\"]) for row in rows]\nusers = [int(row[\"users\"]) for row in rows]\n\nprint(f\"rows={len(rows)} columns={len(rows[0])}\")\nprint(f\"revenue_total={sum(revenues)} revenue_max={max(revenues)}\")\nprint(f\"users_total={sum(users)} avg_users={round(sum(users) / len(users), 2)}\")\nprint(\"regions=\" + \",\".join(sorted({row[\"region\"] for row in rows})))",
+  "limits": {
+    "timeoutMs": 15000,
+    "cpus": 1,
+    "memoryMb": 256,
+    "pidsLimit": 64
+  }
+}

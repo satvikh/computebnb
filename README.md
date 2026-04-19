@@ -156,6 +156,38 @@ The runner listens on `http://localhost:4317`. See `worker-runner/README.md` for
    - proof hash
    - event trail
 
+## Basic End-to-End Docker Flow
+
+This is the simplest requester-to-provider path:
+
+1. Configure `.env.local` with `MONGODB_URI`.
+2. Start the web app:
+
+```bash
+npm run dev
+```
+
+3. Start the Tauri provider app:
+
+```bash
+npm run tauri
+```
+
+4. In the provider app, open Jobs and start the Docker sandbox runner.
+   - The runner starts with polling enabled.
+   - If `PROVIDER_ID` and `PROVIDER_TOKEN` are not set, it self-registers as a Docker-capable provider.
+5. Open the requester dashboard:
+
+```text
+http://localhost:3000/requester
+```
+
+6. Queue one of the sample jobs.
+7. The runner polls `/api/worker/poll`, receives the job, runs the `runnerPayload` in Docker, and reports completion or failure back to the API.
+8. Open the job result page from `/requester` or `/jobs` to see the stored result and event trail.
+
+Requester sample payloads also live in `worker-runner/samples/requester/`.
+
 ## Quality Checks
 
 - `npm run lint`

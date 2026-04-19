@@ -1,0 +1,10 @@
+{
+  "type": "python_script",
+  "script": "tickets = [\n    \"The install was smooth and the app feels fast.\",\n    \"The worker crashed twice while Docker was starting.\",\n    \"I found the payout screen but I am unsure what pending means.\",\n    \"Great onboarding flow. The dashboard is clear.\",\n]\n\npositive_words = {\"smooth\", \"fast\", \"great\", \"clear\"}\nnegative_words = {\"crashed\", \"unsure\", \"twice\"}\ncounts = {\"positive\": 0, \"neutral\": 0, \"negative\": 0}\n\nfor ticket in tickets:\n    words = set(ticket.lower().replace(\".\", \"\").split())\n    score = len(words & positive_words) - len(words & negative_words)\n    label = \"positive\" if score > 0 else \"negative\" if score < 0 else \"neutral\"\n    counts[label] += 1\n    print(f\"{label}: {ticket}\")\n\nprint(\"summary=\" + \", \".join(f\"{key}:{value}\" for key, value in counts.items()))",
+  "limits": {
+    "timeoutMs": 15000,
+    "cpus": 1,
+    "memoryMb": 256,
+    "pidsLimit": 64
+  }
+}

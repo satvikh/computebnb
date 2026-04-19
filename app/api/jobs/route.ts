@@ -9,8 +9,8 @@ const schema = z.object({
   title: z.string().min(1),
   type: z.enum(["text_generation", "image_caption", "embedding", "shell_demo"]),
   input: z.string().min(1),
-  requiredCapabilities: z.array(z.string()).optional(),
-  runnerPayload: z.record(z.unknown()).optional(),
+  requiredCapabilities: z.preprocess(parseStringList, z.array(z.string()).optional()),
+  runnerPayload: z.preprocess(parseJsonRecord, z.record(z.unknown()).optional()),
   budgetCents: z.coerce.number().int().positive().optional(),
 });
 
@@ -72,4 +72,17 @@ function capabilitiesForType(type: z.infer<typeof schema>["type"]) {
   if (type === "shell_demo") return ["cpu", "docker"];
   if (type === "embedding" || type === "text_generation") return ["cpu", "node"];
   return ["cpu"];
+}
+
+function parseStringList(value: unknown) {
+  if (typeof value !== "string") return value;
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parseJsonRecord(value: unknown) {
+  if (typeof value !== "string" || !value.trim()) return value || undefined;
+  return JSON.parse(value);
 }

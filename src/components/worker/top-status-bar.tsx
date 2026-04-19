@@ -24,7 +24,7 @@ export function TopStatusBar({ state }: { state: WorkerState }) {
         </span>
         <span className="inline-flex items-center gap-1.5">
           <BatteryCharging className="h-3.5 w-3.5 text-emerald-200" />
-          {state.metrics.batteryPercent.toFixed(0)}% charging
+          {state.metrics.batteryPercent ? `${state.metrics.batteryPercent.toFixed(0)}% ${state.machine.charging ? "charging" : "battery"}` : "Battery unavailable"}
         </span>
         <span className="inline-flex items-center gap-1.5">
           <Activity className="h-3.5 w-3.5 text-cyan-200" />

@@ -110,11 +110,13 @@ To poll the existing ComputeBNB app API:
 ```env
 POLL_ENABLED=true
 API_BASE_URL=http://localhost:3000
-PROVIDER_ID=<provider-id>
+PROVIDER_ID=
 PROVIDER_TOKEN=
 ```
 
-The poller calls `POST /api/worker/poll`. If the remote job includes a `runnerPayload`, it is used directly as a worker-runner payload. Otherwise the poller maps the current app's free-form mock job shape into a `benchmark_demo` job so the MVP can still execute something real.
+If `PROVIDER_ID` and `PROVIDER_TOKEN` are blank, the poller self-registers as a Docker-capable provider and uses the returned token for heartbeat/poll/start/complete/fail calls.
+
+The poller calls `POST /api/worker/poll`. If the remote job includes a `runnerPayload`, it is used directly as a worker-runner payload. Otherwise the poller maps the current app's free-form job shape into a `benchmark_demo` job so the MVP can still execute something real.
 
 ## REST API
 

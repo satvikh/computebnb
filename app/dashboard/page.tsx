@@ -3,6 +3,7 @@ import { MarketplaceShell } from "@/app/_components/marketplace-shell";
 import { MachineGrid, Sparkline, StatusPill } from "@/app/_components/chrome";
 import { calculateSuccessRate, getDashboardSummary } from "@/lib/marketplace";
 import { isDbConfigured } from "@/lib/db";
+import { markStaleProvidersOffline } from "@/lib/scheduling";
 
 function centsToDollars(cents: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
@@ -28,6 +29,10 @@ function buildSparkline(values: number[]) {
   return values.length > 1 ? values : [0, values[0] ?? 0, (values[0] ?? 0) + 1];
 }
 
+function isLiveProvider(status: string) {
+  return status === "online" || status === "busy";
+}
+
 export const dynamic = "force-dynamic";
 
 export default async function DashboardPage() {
@@ -36,6 +41,7 @@ export default async function DashboardPage() {
 
   try {
     if (isDbConfigured()) {
+      await markStaleProvidersOffline();
       summary = await getDashboardSummary();
     }
   } catch {
@@ -43,6 +49,8 @@ export default async function DashboardPage() {
   }
 
   const providers = summary?.providers ?? [];
+  const liveProviders = providers.filter((provider) => isLiveProvider(provider.status));
+  const liveProviderCount = (summary?.providerCounts.online ?? 0) + (summary?.providerCounts.busy ?? 0);
   const recentJobs = summary?.recentJobs ?? [];
   const recentActivity = summary?.recentActivity ?? [];
   const todayProviderPayoutCents = recentJobs
@@ -73,7 +81,7 @@ export default async function DashboardPage() {
         <>
           <span className="mono" style={{ fontSize: 11, color: "var(--ink-3)" }}>
             <span className="dot live animated" style={{ marginRight: 6 }} />
-            {providers.length} machines · {summary?.providerCounts.busy ?? 0} live
+            {providers.length} machines · {liveProviderCount} live
           </span>
           <span style={{ width: 1, height: 18, background: "var(--rule-soft)" }} />
           <span className="mono" style={{ color: "var(--ink-3)", fontSize: 11 }}>
@@ -133,7 +141,7 @@ export default async function DashboardPage() {
             <MachineGrid rows={6} cols={24} seed={providers.length + (summary?.jobCounts.running ?? 0) + 7} running={0.16} warming={0.08} live={0.42} />
             <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, fontFamily: "var(--font-mono)", fontSize: 11 }}>
               {[
-                ["LIVE", String(summary?.providerCounts.online ?? 0)],
+                ["LIVE", String(liveProviderCount)],
                 ["RUN", String(summary?.providerCounts.busy ?? 0)],
                 ["QUEUE", String(summary?.jobCounts.queued ?? 0)],
                 ["FAIL", String(providers.reduce((sum, provider) => sum + provider.failedJobs, 0))]
@@ -150,11 +158,11 @@ export default async function DashboardPage() {
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
               <div className="eyebrow">Fleet cards</div>
               <span className="mono" style={{ fontSize: 10, color: "var(--ink-3)" }}>
-                based on real provider state
+                all live machines
               </span>
             </div>
             <div style={{ display: "grid", gap: 12 }}>
-              {providers.slice(0, 6).map((provider) => (
+              {liveProviders.map((provider) => (
                 <div key={provider.id} style={{ border: "1px solid var(--rule-soft)", background: "var(--paper-2)", padding: 16 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
                     <div>
@@ -175,9 +183,9 @@ export default async function DashboardPage() {
                   </div>
                 </div>
               ))}
-              {!providers.length && (
+              {!liveProviders.length && (
                 <EmptyState
-                  title={dbError || !isDbConfigured() ? "Control plane waiting for MongoDB" : "No providers yet"}
+                  title={dbError || !isDbConfigured() ? "Control plane waiting for MongoDB" : "No live providers yet"}
                   copy={dbError || !isDbConfigured()
                     ? "Set MONGODB_URI to power the live marketplace views. The styled web UI is ready to consume backend truth as soon as the database is available."
                     : "Register a provider node and heartbeat it into the marketplace to populate this fleet strip."}
