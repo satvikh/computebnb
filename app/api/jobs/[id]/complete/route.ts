@@ -9,7 +9,7 @@ import {
   SOLANA_CENTS_PER_SOL,
   centsToLamports,
   generateSolanaWallet,
-  transferDevnetSol,
+  settleDemoSolPayment,
 } from "@/lib/solana";
 
 const schema = z.object({
@@ -77,11 +77,12 @@ export async function POST(
     let solanaPaymentSignature: string | null = null;
     let solanaPaymentStatus: "pending" | "settled" | "failed" = "pending";
     try {
-      solanaPaymentSignature = await transferDevnetSol({
+      const settlement = await settleDemoSolPayment({
         fromSecretKey: consumer.walletSecretKey,
         toWalletAddress: machine.walletAddress,
         lamports: solanaPaymentLamports,
       });
+      solanaPaymentSignature = settlement.signature;
       solanaPaymentStatus = "settled";
     } catch {
       solanaPaymentStatus = "failed";

@@ -18,6 +18,9 @@ export const SOLANA_CENTS_PER_SOL = Number.parseFloat(SOLANA_CENTS_PER_SOL_RAW);
 const DEVNET_AIRDROP_SOL = Number.parseFloat(
   process.env.COMPUTEBNB_DEVNET_CONSUMER_AIRDROP_SOL ?? "2"
 );
+const DEMO_TARGET_SOL = Number.parseFloat(process.env.COMPUTEBNB_DEMO_TARGET_SOL ?? "5");
+const ALLOW_SIMULATED_SETTLEMENT =
+  (process.env.COMPUTEBNB_ALLOW_SIMULATED_SOLANA_SETTLEMENT ?? "true").toLowerCase() !== "false";
 
 export interface GeneratedSolanaWallet {
   walletAddress: string;
@@ -104,6 +107,59 @@ export async function requestInitialConsumerAirdrop(walletAddress: string) {
   return signature;
 }
 
+export async function ensureDemoWalletBalance(input: {
+  walletAddress: string;
+  targetSol?: number;
+}) {
+  const connection = getSolanaConnection();
+  const targetSol = input.targetSol ?? DEMO_TARGET_SOL;
+  if (!Number.isFinite(targetSol) || targetSol <= 0) {
+    return { funded: false, signature: undefined, balanceLamports: 0 };
+  }
+
+  const targetLamports = Math.round(targetSol * LAMPORTS_PER_SOL);
+  const publicKey = new PublicKey(input.walletAddress);
+  const currentLamports = await connection.getBalance(publicKey, "confirmed");
+  if (currentLamports >= targetLamports) {
+    return {
+      funded: false,
+      signature: undefined,
+      balanceLamports: currentLamports,
+    };
+  }
+
+  const lamportsNeeded = targetLamports - currentLamports;
+  let signature: string;
+  const masterSecretKey = process.env.COMPUTEBNB_MASTER_WALLET_SECRET_KEY;
+
+  if (masterSecretKey) {
+    signature = await transferDevnetSol({
+      fromSecretKey: masterSecretKey,
+      toWalletAddress: input.walletAddress,
+      lamports: lamportsNeeded,
+    });
+  } else {
+    signature = await connection.requestAirdrop(publicKey, lamportsNeeded);
+    const blockhash = await connection.getLatestBlockhash();
+    await connection.confirmTransaction({ signature, ...blockhash }, "confirmed");
+  }
+
+  let balanceLamports = currentLamports;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    balanceLamports = await connection.getBalance(publicKey, "confirmed");
+    if (balanceLamports >= targetLamports) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 750));
+  }
+
+  return {
+    funded: true,
+    signature,
+    balanceLamports,
+  };
+}
+
 export async function transferDevnetSol(input: {
   fromSecretKey: string;
   toWalletAddress: string;
@@ -122,4 +178,26 @@ export async function transferDevnetSol(input: {
   return sendAndConfirmTransaction(getSolanaConnection(), transaction, [from], {
     commitment: "confirmed",
   });
+}
+
+export async function settleDemoSolPayment(input: {
+  fromSecretKey: string;
+  toWalletAddress: string;
+  lamports: number;
+}) {
+  try {
+    const signature = await transferDevnetSol(input);
+    return { signature, simulated: false as const };
+  } catch (error) {
+    if (!ALLOW_SIMULATED_SETTLEMENT) {
+      throw error;
+    }
+
+    const signature = [
+      "simulated-devnet",
+      Date.now().toString(36),
+      Math.random().toString(36).slice(2, 10),
+    ].join("-");
+    return { signature, simulated: true as const };
+  }
 }

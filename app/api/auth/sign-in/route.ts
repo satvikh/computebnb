@@ -3,7 +3,11 @@ import { z } from "zod";
 import dbConnect from "@/lib/db";
 import { User } from "@/lib/models";
 import { formatUser, writeSessionUser } from "@/lib/session";
-import { generateSolanaWallet, requestInitialConsumerAirdrop } from "@/lib/solana";
+import {
+  ensureDemoWalletBalance,
+  generateSolanaWallet,
+  requestInitialConsumerAirdrop,
+} from "@/lib/solana";
 
 const schema = z
   .object({
@@ -42,6 +46,14 @@ export async function POST(request: Request) {
         } catch {
           initialAirdropSignature = undefined;
         }
+        try {
+          const funding = await ensureDemoWalletBalance({ walletAddress: wallet.walletAddress });
+          if (funding.signature) {
+            initialAirdropSignature = funding.signature;
+          }
+        } catch {
+          // Keep sign-in resilient even if demo funding is rate-limited.
+        }
       }
 
       user = await User.create({
@@ -68,6 +80,16 @@ export async function POST(request: Request) {
           user.initialAirdropSignature = await requestInitialConsumerAirdrop(wallet.walletAddress);
         } catch {
           user.initialAirdropSignature = undefined;
+        }
+      }
+      if (user.role === "consumer" && user.walletAddress) {
+        try {
+          const funding = await ensureDemoWalletBalance({ walletAddress: user.walletAddress });
+          if (funding.signature) {
+            user.initialAirdropSignature = funding.signature;
+          }
+        } catch {
+          // Keep sign-in resilient even if demo funding is rate-limited.
         }
       }
       await user.save();
