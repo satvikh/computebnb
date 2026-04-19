@@ -79,6 +79,8 @@ export class RunnerService {
 
     try {
       await hooks.onComplete(job);
+    } catch (error) {
+      console.warn("[runner-service] completion hook failed", error instanceof Error ? error.message : error);
     } finally {
       this.hooks.delete(id);
     }

@@ -15,6 +15,7 @@ interface RemotePollResponse {
 export class JobPoller {
   private timer: NodeJS.Timeout | undefined;
   private busy = false;
+  private remoteJobId: string | undefined;
 
   constructor(
     private readonly config: RunnerConfig,
@@ -36,7 +37,7 @@ export class JobPoller {
   }
 
   private async tick() {
-    if (this.busy) return;
+    if (this.busy || this.remoteJobId) return;
     this.busy = true;
 
     try {
@@ -51,8 +52,15 @@ export class JobPoller {
         providerId: this.config.providerId
       });
       const submitted = this.service.submit(payload, {
-        onComplete: (job) => this.reportRemoteResult(response.job!.id, job)
+        onComplete: async (job) => {
+          try {
+            await this.reportRemoteResult(response.job!.id, job);
+          } finally {
+            this.remoteJobId = undefined;
+          }
+        }
       });
+      this.remoteJobId = response.job.id;
       console.log(`[poller] accepted remote job ${response.job.id} as ${submitted.id}`);
     } catch (error) {
       console.warn("[poller] failed", error instanceof Error ? error.message : error);
