@@ -1,0 +1,12 @@
+{
+  "type": "inference",
+  "input": {
+    "text": "A provider machine runs this approved inference demo in a short-lived Docker sandbox."
+  },
+  "limits": {
+    "timeoutMs": 15000,
+    "cpus": 1,
+    "memoryMb": 256,
+    "pidsLimit": 64
+  }
+}
