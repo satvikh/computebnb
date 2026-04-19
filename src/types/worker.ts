@@ -50,6 +50,8 @@ export interface Job {
   cpuUsage: number;
   memoryUsage: number;
   logs: JobLog[];
+  executionOutput?: string | null;
+  executionError?: string | null;
 }
 
 export interface Earnings {

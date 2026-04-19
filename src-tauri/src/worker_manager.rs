@@ -1,6 +1,9 @@
 use std::{
+    fs,
+    io::Write,
+    process::{Command, Stdio},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
@@ -35,11 +38,21 @@ impl WorkerManager {
     }
 
     fn snapshot(&self) -> WorkerRuntimeSnapshot {
-        self.runtime.lock().expect("worker runtime poisoned").snapshot()
+        self.runtime
+            .lock()
+            .expect("worker runtime poisoned")
+            .snapshot()
     }
 
     fn emit_snapshot(&self, app: &AppHandle) {
-        emit_worker_event(app, SNAPSHOT_EVENT, SnapshotEvent { event_type: "snapshot", snapshot: self.snapshot() });
+        emit_worker_event(
+            app,
+            SNAPSHOT_EVENT,
+            SnapshotEvent {
+                event_type: "snapshot",
+                snapshot: self.snapshot(),
+            },
+        );
     }
 
     fn ensure_runner(&self, app: AppHandle) {
@@ -167,6 +180,8 @@ pub struct Job {
     cpu_usage: f64,
     memory_usage: f64,
     logs: Vec<JobLog>,
+    execution_output: Option<String>,
+    execution_error: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -235,7 +250,12 @@ impl WorkerRuntime {
             auto_accept_jobs: true,
             auto_start: false,
             active_hours: "6:00 PM - 8:00 AM".to_string(),
-            allowed_job_types: vec![JobType::Render, JobType::Simulation, JobType::BatchInference, JobType::Compile],
+            allowed_job_types: vec![
+                JobType::Render,
+                JobType::Simulation,
+                JobType::BatchInference,
+                JobType::Compile,
+            ],
         };
 
         Self {
@@ -271,18 +291,43 @@ impl WorkerRuntime {
                 today: 14.21,
                 completed_jobs: 37,
                 history: vec![
-                    EarningsPoint { label: "Mon".into(), amount: 11.42 },
-                    EarningsPoint { label: "Tue".into(), amount: 18.74 },
-                    EarningsPoint { label: "Wed".into(), amount: 9.6 },
-                    EarningsPoint { label: "Thu".into(), amount: 22.18 },
-                    EarningsPoint { label: "Fri".into(), amount: 16.91 },
-                    EarningsPoint { label: "Sat".into(), amount: 27.35 },
-                    EarningsPoint { label: "Sun".into(), amount: 14.7 },
+                    EarningsPoint {
+                        label: "Mon".into(),
+                        amount: 11.42,
+                    },
+                    EarningsPoint {
+                        label: "Tue".into(),
+                        amount: 18.74,
+                    },
+                    EarningsPoint {
+                        label: "Wed".into(),
+                        amount: 9.6,
+                    },
+                    EarningsPoint {
+                        label: "Thu".into(),
+                        amount: 22.18,
+                    },
+                    EarningsPoint {
+                        label: "Fri".into(),
+                        amount: 16.91,
+                    },
+                    EarningsPoint {
+                        label: "Sat".into(),
+                        amount: 27.35,
+                    },
+                    EarningsPoint {
+                        label: "Sun".into(),
+                        amount: 14.7,
+                    },
                 ],
             },
             settings,
             network_online: true,
-            worker_logs: vec![log("log-boot", LogLevel::Info, "Control plane ready. Worker is waiting for a secure session.")],
+            worker_logs: vec![log(
+                "log-boot",
+                LogLevel::Info,
+                "Control plane ready. Worker is waiting for a secure session.",
+            )],
             rng_seed: 0xC0FFEE,
             job_counter: 9900,
         }
@@ -311,8 +356,15 @@ impl WorkerRuntime {
 
         let log = self.push_log(LogLevel::Info, "Worker preferences updated.");
         vec![
-            RuntimeEvent::SettingsUpdated(SettingsUpdatedEvent { event_type: "settings_updated", settings: self.settings.clone() }),
-            RuntimeEvent::LogEmitted(ActivityLogEvent { event_type: "log_emitted", log, job_id: None }),
+            RuntimeEvent::SettingsUpdated(SettingsUpdatedEvent {
+                event_type: "settings_updated",
+                settings: self.settings.clone(),
+            }),
+            RuntimeEvent::LogEmitted(ActivityLogEvent {
+                event_type: "log_emitted",
+                log,
+                job_id: None,
+            }),
         ]
     }
 
@@ -327,12 +379,27 @@ impl WorkerRuntime {
     }
 
     fn tick(&mut self) -> Vec<RuntimeEvent> {
-        if matches!(self.machine.status, WorkerStatus::Offline | WorkerStatus::Paused | WorkerStatus::Error) {
-            self.metrics.cpu_usage = clamp(self.metrics.cpu_usage + self.range(-2.0, 2.0), 2.0, 14.0);
-            self.metrics.memory_usage = clamp(self.metrics.memory_usage + self.range(-1.0, 1.0), 20.0, 34.0);
+        if matches!(
+            self.machine.status,
+            WorkerStatus::Offline | WorkerStatus::Paused | WorkerStatus::Error
+        ) {
+            self.metrics.cpu_usage =
+                clamp(self.metrics.cpu_usage + self.range(-2.0, 2.0), 2.0, 14.0);
+            self.metrics.memory_usage = clamp(
+                self.metrics.memory_usage + self.range(-1.0, 1.0),
+                20.0,
+                34.0,
+            );
             self.metrics.battery_percent = clamp(self.metrics.battery_percent - 0.01, 1.0, 100.0);
-            self.metrics.temperature_c = clamp(self.metrics.temperature_c + self.range(-1.0, 1.0), 37.0, 45.0);
-            return vec![RuntimeEvent::MetricsUpdated(MetricsUpdateEvent { event_type: "metrics_updated", metrics: self.metrics.clone() })];
+            self.metrics.temperature_c = clamp(
+                self.metrics.temperature_c + self.range(-1.0, 1.0),
+                37.0,
+                45.0,
+            );
+            return vec![RuntimeEvent::MetricsUpdated(MetricsUpdateEvent {
+                event_type: "metrics_updated",
+                metrics: self.metrics.clone(),
+            })];
         }
 
         self.machine.uptime_seconds += 2;
@@ -356,9 +423,16 @@ impl WorkerRuntime {
             let job = self.create_job();
             self.machine.status = WorkerStatus::Busy;
             self.active_job = Some(job.clone());
-            let log = self.push_log(LogLevel::Success, &format!("Scheduler assigned {}.", job.name));
+            let log = self.push_log(
+                LogLevel::Success,
+                &format!("Scheduler assigned {}.", job.name),
+            );
 
-            self.metrics.cpu_usage = clamp(job.cpu_usage + self.range(0.0, 8.0), 35.0, self.settings.cpu_limit);
+            self.metrics.cpu_usage = clamp(
+                job.cpu_usage + self.range(0.0, 8.0),
+                35.0,
+                self.settings.cpu_limit,
+            );
             self.metrics.memory_usage = clamp(job.memory_usage + self.range(0.0, 5.0), 28.0, 72.0);
             self.metrics.temperature_c = clamp(self.metrics.temperature_c + 2.0, 39.0, 72.0);
 
@@ -368,9 +442,19 @@ impl WorkerRuntime {
                 last_heartbeat_at: self.machine.last_heartbeat_at.clone(),
                 uptime_seconds: self.machine.uptime_seconds,
             }));
-            events.push(RuntimeEvent::JobAssigned(JobAssignedEvent { event_type: "job_assigned", job: job.clone() }));
-            events.push(RuntimeEvent::LogEmitted(ActivityLogEvent { event_type: "log_emitted", log, job_id: Some(job.id) }));
-            events.push(RuntimeEvent::MetricsUpdated(MetricsUpdateEvent { event_type: "metrics_updated", metrics: self.metrics.clone() }));
+            events.push(RuntimeEvent::JobAssigned(JobAssignedEvent {
+                event_type: "job_assigned",
+                job: job.clone(),
+            }));
+            events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
+                event_type: "log_emitted",
+                log,
+                job_id: Some(job.id),
+            }));
+            events.push(RuntimeEvent::MetricsUpdated(MetricsUpdateEvent {
+                event_type: "metrics_updated",
+                metrics: self.metrics.clone(),
+            }));
             return events;
         }
 
@@ -386,83 +470,162 @@ impl WorkerRuntime {
                 last_heartbeat_at: self.machine.last_heartbeat_at.clone(),
                 uptime_seconds: self.machine.uptime_seconds,
             }));
-            events.push(RuntimeEvent::MetricsUpdated(MetricsUpdateEvent { event_type: "metrics_updated", metrics: self.metrics.clone() }));
+            events.push(RuntimeEvent::MetricsUpdated(MetricsUpdateEvent {
+                event_type: "metrics_updated",
+                metrics: self.metrics.clone(),
+            }));
             return events;
         }
 
         let mut completed_job = None;
         let mut progress_log = None;
-        let progress_bump = self.range(7.0, 16.0);
         let earning_bump = self.range(0.22, 0.67);
-        let cpu_usage = clamp(40.0 + self.range(0.0, self.settings.cpu_limit), 24.0, self.settings.cpu_limit);
+        let cpu_usage = clamp(
+            40.0 + self.range(0.0, self.settings.cpu_limit),
+            24.0,
+            self.settings.cpu_limit,
+        );
         let memory_usage = clamp(36.0 + self.range(0.0, 22.0), 26.0, 70.0);
-        let should_log = self.next_unit() > 0.45;
-        let log_message = if should_log { Some(self.pick_log_message().to_string()) } else { None };
 
         if let Some(job) = &mut self.active_job {
-            job.progress = clamp(job.progress + progress_bump, 0.0, 100.0);
+            job.progress = 35.0;
             job.earnings = money(job.earnings + earning_bump);
             job.cpu_usage = cpu_usage;
             job.memory_usage = memory_usage;
 
-            if let Some(message) = log_message {
-                let log = log_with_random_id(&mut self.rng_seed, LogLevel::Info, &message);
-                job.logs.insert(0, log.clone());
-                job.logs.truncate(16);
-                progress_log = Some((job.id.clone(), log));
-            }
+            let start_log = log_with_random_id(
+                &mut self.rng_seed,
+                LogLevel::Info,
+                "Launching bounded local script executor.",
+            );
+            job.logs.insert(0, start_log.clone());
+            progress_log = Some((job.id.clone(), start_log));
 
-            if job.progress >= 100.0 {
-                job.status = JobStatus::Completed;
-                job.progress = 100.0;
-                let done_log = log_with_random_id(&mut self.rng_seed, LogLevel::Success, "Job completed. Results delivered and payout credited.");
-                job.logs.insert(0, done_log);
-                job.logs.truncate(16);
-                completed_job = Some(job.clone());
+            match execute_demo_script(&job.id, &job.name, &job.job_type) {
+                Ok(output) => {
+                    job.status = JobStatus::Completed;
+                    job.progress = 100.0;
+                    job.execution_output = Some(output.summary.clone());
+                    job.execution_error = None;
+                    let output_log = log_with_random_id(
+                        &mut self.rng_seed,
+                        LogLevel::Info,
+                        &format!("Executor stdout: {}", output.summary),
+                    );
+                    let done_log = log_with_random_id(
+                        &mut self.rng_seed,
+                        LogLevel::Success,
+                        &format!(
+                            "Script finished in {}ms. Results delivered and payout credited.",
+                            output.duration_ms
+                        ),
+                    );
+                    job.logs.insert(0, done_log);
+                    job.logs.insert(1, output_log);
+                    job.logs.truncate(16);
+                    completed_job = Some(job.clone());
+                }
+                Err(error) => {
+                    job.status = JobStatus::Failed;
+                    job.progress = 100.0;
+                    job.execution_error = Some(error.clone());
+                    let error_log = log_with_random_id(
+                        &mut self.rng_seed,
+                        LogLevel::Error,
+                        &format!("Executor failed: {}", error),
+                    );
+                    job.logs.insert(0, error_log);
+                    job.logs.truncate(16);
+                    completed_job = Some(job.clone());
+                }
             }
         }
 
         self.metrics.cpu_usage = cpu_usage;
         self.metrics.memory_usage = memory_usage;
         self.metrics.battery_percent = clamp(self.metrics.battery_percent - 0.03, 1.0, 100.0);
-        self.metrics.temperature_c = clamp(43.0 + cpu_usage / 5.0 + self.range(0.0, 3.0), 40.0, 78.0);
+        self.metrics.temperature_c =
+            clamp(43.0 + cpu_usage / 5.0 + self.range(0.0, 3.0), 40.0, 78.0);
         self.metrics.network_mbps = clamp(90.0 + self.range(0.0, 80.0), 48.0, 220.0);
 
         if let Some((job_id, log)) = progress_log {
-            events.push(RuntimeEvent::LogEmitted(ActivityLogEvent { event_type: "log_emitted", log, job_id: Some(job_id) }));
+            events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
+                event_type: "log_emitted",
+                log,
+                job_id: Some(job_id),
+            }));
         }
 
-        events.push(RuntimeEvent::MetricsUpdated(MetricsUpdateEvent { event_type: "metrics_updated", metrics: self.metrics.clone() }));
+        events.push(RuntimeEvent::MetricsUpdated(MetricsUpdateEvent {
+            event_type: "metrics_updated",
+            metrics: self.metrics.clone(),
+        }));
 
         if let Some(job) = completed_job {
             self.active_job = None;
             self.machine.status = WorkerStatus::Idle;
             self.recent_jobs.insert(0, job.clone());
             self.recent_jobs.truncate(8);
-            self.earnings.lifetime = money(self.earnings.lifetime + job.earnings);
-            self.earnings.pending = money(self.earnings.pending + job.earnings);
-            self.earnings.today = money(self.earnings.today + job.earnings);
-            self.earnings.completed_jobs += 1;
-            if let Some(point) = self.earnings.history.last_mut() {
-                point.amount = money(point.amount + job.earnings);
+            let job_succeeded = matches!(&job.status, JobStatus::Completed);
+            if job_succeeded {
+                self.earnings.lifetime = money(self.earnings.lifetime + job.earnings);
+                self.earnings.pending = money(self.earnings.pending + job.earnings);
+                self.earnings.today = money(self.earnings.today + job.earnings);
+                self.earnings.completed_jobs += 1;
+                if let Some(point) = self.earnings.history.last_mut() {
+                    point.amount = money(point.amount + job.earnings);
+                }
             }
 
-            let log = self.push_log(LogLevel::Success, &format!("{} completed. Earned ${:.2}.", job.name, job.earnings));
+            let log = if job_succeeded {
+                let output = job
+                    .execution_output
+                    .clone()
+                    .unwrap_or_else(|| "no stdout".to_string());
+                self.push_log(
+                    LogLevel::Success,
+                    &format!(
+                        "{} completed by local executor. Output: {}. Earned ${:.2}.",
+                        job.name, output, job.earnings
+                    ),
+                )
+            } else {
+                let error = job
+                    .execution_error
+                    .clone()
+                    .unwrap_or_else(|| "unknown executor error".to_string());
+                self.push_log(
+                    LogLevel::Error,
+                    &format!("{} failed in local executor: {}.", job.name, error),
+                )
+            };
             events.push(RuntimeEvent::JobCompleted(JobCompletedEvent {
                 event_type: "job_completed",
                 job,
                 recent_jobs: self.recent_jobs.clone(),
             }));
-            events.push(RuntimeEvent::EarningsUpdated(EarningsUpdateEvent { event_type: "earnings_updated", earnings: self.earnings.clone() }));
+            if job_succeeded {
+                events.push(RuntimeEvent::EarningsUpdated(EarningsUpdateEvent {
+                    event_type: "earnings_updated",
+                    earnings: self.earnings.clone(),
+                }));
+            }
             events.push(RuntimeEvent::StatusChanged(WorkerStatusChangedEvent {
                 event_type: "worker_status_changed",
                 status: WorkerStatus::Idle,
                 last_heartbeat_at: self.machine.last_heartbeat_at.clone(),
                 uptime_seconds: self.machine.uptime_seconds,
             }));
-            events.push(RuntimeEvent::LogEmitted(ActivityLogEvent { event_type: "log_emitted", log, job_id: None }));
+            events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
+                event_type: "log_emitted",
+                log,
+                job_id: None,
+            }));
         } else if let Some(job) = self.active_job.clone() {
-            events.push(RuntimeEvent::JobProgress(JobProgressEvent { event_type: "job_progress", job }));
+            events.push(RuntimeEvent::JobProgress(JobProgressEvent {
+                event_type: "job_progress",
+                job,
+            }));
         }
 
         events
@@ -477,7 +640,13 @@ impl WorkerRuntime {
             "CI compile acceleration shard",
             "Video thumbnail render pack",
         ];
-        let job_types = [JobType::Render, JobType::Simulation, JobType::BatchInference, JobType::Compile, JobType::DataCleaning];
+        let job_types = [
+            JobType::Render,
+            JobType::Simulation,
+            JobType::BatchInference,
+            JobType::Compile,
+            JobType::DataCleaning,
+        ];
         let index = (self.next_unit() * names.len() as f64).floor() as usize;
         let type_index = (self.next_unit() * job_types.len() as f64).floor() as usize;
         let started_at = Utc::now();
@@ -489,14 +658,27 @@ impl WorkerRuntime {
             status: JobStatus::Running,
             progress: 2.0,
             started_at: Some(started_at.to_rfc3339_opts(SecondsFormat::Millis, true)),
-            estimated_completion_at: Some((started_at + ChronoDuration::seconds(55)).to_rfc3339_opts(SecondsFormat::Millis, true)),
+            estimated_completion_at: Some(
+                (started_at + ChronoDuration::seconds(55))
+                    .to_rfc3339_opts(SecondsFormat::Millis, true),
+            ),
             earnings: 0.08,
             cpu_usage: 48.0,
             memory_usage: 32.0,
             logs: vec![
-                log_with_random_id(&mut self.rng_seed, LogLevel::Success, "Job accepted automatically. Preparing isolated runtime."),
-                log_with_random_id(&mut self.rng_seed, LogLevel::Info, "Runtime attestation complete."),
+                log_with_random_id(
+                    &mut self.rng_seed,
+                    LogLevel::Success,
+                    "Job accepted automatically. Preparing isolated runtime.",
+                ),
+                log_with_random_id(
+                    &mut self.rng_seed,
+                    LogLevel::Info,
+                    "Runtime attestation complete.",
+                ),
             ],
+            execution_output: None,
+            execution_error: None,
         }
     }
 
@@ -505,20 +687,6 @@ impl WorkerRuntime {
         self.worker_logs.insert(0, log.clone());
         self.worker_logs.truncate(40);
         log
-    }
-
-    fn pick_log_message(&mut self) -> &'static str {
-        let messages = [
-            "Verified sandbox profile and payout contract.",
-            "Pulled encrypted workload bundle.",
-            "Allocated local CPU budget inside user limit.",
-            "Checkpoint uploaded to ComputeBNB relay.",
-            "Progress heartbeat accepted by scheduler.",
-            "Thermal headroom is healthy.",
-            "Output chunk sealed and queued for delivery.",
-        ];
-        let index = (self.next_unit() * messages.len() as f64).floor() as usize;
-        messages[index.min(messages.len() - 1)]
     }
 
     fn next_unit(&mut self) -> f64 {
@@ -642,15 +810,29 @@ enum RuntimeEvent {
 fn emit_events(app: &AppHandle, events: Vec<RuntimeEvent>) {
     for event in events {
         match event {
-            RuntimeEvent::StatusChanged(payload) => emit_worker_event(app, STATUS_CHANGED_EVENT, payload),
+            RuntimeEvent::StatusChanged(payload) => {
+                emit_worker_event(app, STATUS_CHANGED_EVENT, payload)
+            }
             RuntimeEvent::Heartbeat(payload) => emit_worker_event(app, HEARTBEAT_EVENT, payload),
-            RuntimeEvent::JobAssigned(payload) => emit_worker_event(app, JOB_ASSIGNED_EVENT, payload),
-            RuntimeEvent::JobProgress(payload) => emit_worker_event(app, JOB_PROGRESS_EVENT, payload),
+            RuntimeEvent::JobAssigned(payload) => {
+                emit_worker_event(app, JOB_ASSIGNED_EVENT, payload)
+            }
+            RuntimeEvent::JobProgress(payload) => {
+                emit_worker_event(app, JOB_PROGRESS_EVENT, payload)
+            }
             RuntimeEvent::LogEmitted(payload) => emit_worker_event(app, LOG_EMITTED_EVENT, payload),
-            RuntimeEvent::JobCompleted(payload) => emit_worker_event(app, JOB_COMPLETED_EVENT, payload),
-            RuntimeEvent::MetricsUpdated(payload) => emit_worker_event(app, METRICS_UPDATED_EVENT, payload),
-            RuntimeEvent::EarningsUpdated(payload) => emit_worker_event(app, EARNINGS_UPDATED_EVENT, payload),
-            RuntimeEvent::SettingsUpdated(payload) => emit_worker_event(app, SETTINGS_UPDATED_EVENT, payload),
+            RuntimeEvent::JobCompleted(payload) => {
+                emit_worker_event(app, JOB_COMPLETED_EVENT, payload)
+            }
+            RuntimeEvent::MetricsUpdated(payload) => {
+                emit_worker_event(app, METRICS_UPDATED_EVENT, payload)
+            }
+            RuntimeEvent::EarningsUpdated(payload) => {
+                emit_worker_event(app, EARNINGS_UPDATED_EVENT, payload)
+            }
+            RuntimeEvent::SettingsUpdated(payload) => {
+                emit_worker_event(app, SETTINGS_UPDATED_EVENT, payload)
+            }
         }
     }
 }
@@ -667,24 +849,50 @@ pub fn detect_machine(app: AppHandle, manager: tauri::State<'_, WorkerManager>) 
         runtime.machine.os = local_os_name();
         runtime.machine.clone()
     };
-    emit_worker_event(&app, MACHINE_DETECTED_EVENT, MachineDetectedEvent { event_type: "machine_detected", machine: machine.clone() });
+    emit_worker_event(
+        &app,
+        MACHINE_DETECTED_EVENT,
+        MachineDetectedEvent {
+            event_type: "machine_detected",
+            machine: machine.clone(),
+        },
+    );
     manager.emit_snapshot(&app);
     machine
 }
 
 #[tauri::command]
-pub fn register_machine(app: AppHandle, manager: tauri::State<'_, WorkerManager>, settings: WorkerSettings) -> WorkerRuntimeSnapshot {
+pub fn register_machine(
+    app: AppHandle,
+    manager: tauri::State<'_, WorkerManager>,
+    settings: WorkerSettings,
+) -> WorkerRuntimeSnapshot {
     {
         let mut runtime = manager.runtime.lock().expect("worker runtime poisoned");
         runtime.registered = true;
         runtime.update_settings(settings);
         runtime.machine.id = "native-node-preview".to_string();
-        let log = runtime.push_log(LogLevel::Success, "Machine registered and trust policy saved.");
-        emit_worker_event(&app, LOG_EMITTED_EVENT, ActivityLogEvent { event_type: "log_emitted", log, job_id: None });
+        let log = runtime.push_log(
+            LogLevel::Success,
+            "Machine registered and trust policy saved.",
+        );
+        emit_worker_event(
+            &app,
+            LOG_EMITTED_EVENT,
+            ActivityLogEvent {
+                event_type: "log_emitted",
+                log,
+                job_id: None,
+            },
+        );
         emit_worker_event(
             &app,
             MACHINE_REGISTERED_EVENT,
-            MachineRegisteredEvent { event_type: "machine_registered", machine: runtime.machine.clone(), settings: runtime.settings.clone() },
+            MachineRegisteredEvent {
+                event_type: "machine_registered",
+                machine: runtime.machine.clone(),
+                settings: runtime.settings.clone(),
+            },
         );
     }
     manager.emit_snapshot(&app);
@@ -692,12 +900,22 @@ pub fn register_machine(app: AppHandle, manager: tauri::State<'_, WorkerManager>
 }
 
 #[tauri::command]
-pub fn start_worker(app: AppHandle, manager: tauri::State<'_, WorkerManager>) -> WorkerRuntimeSnapshot {
+pub fn start_worker(
+    app: AppHandle,
+    manager: tauri::State<'_, WorkerManager>,
+) -> WorkerRuntimeSnapshot {
     let events = {
         let mut runtime = manager.runtime.lock().expect("worker runtime poisoned");
         let mut events = runtime.set_status(WorkerStatus::Idle);
-        let log = runtime.push_log(LogLevel::Success, "Worker started. Establishing scheduler session.");
-        events.push(RuntimeEvent::LogEmitted(ActivityLogEvent { event_type: "log_emitted", log, job_id: None }));
+        let log = runtime.push_log(
+            LogLevel::Success,
+            "Worker started. Establishing scheduler session.",
+        );
+        events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
+            event_type: "log_emitted",
+            log,
+            job_id: None,
+        }));
         events
     };
     emit_events(&app, events);
@@ -707,7 +925,10 @@ pub fn start_worker(app: AppHandle, manager: tauri::State<'_, WorkerManager>) ->
 }
 
 #[tauri::command]
-pub fn stop_worker(app: AppHandle, manager: tauri::State<'_, WorkerManager>) -> WorkerRuntimeSnapshot {
+pub fn stop_worker(
+    app: AppHandle,
+    manager: tauri::State<'_, WorkerManager>,
+) -> WorkerRuntimeSnapshot {
     manager.stop_runner();
     let events = {
         let mut runtime = manager.runtime.lock().expect("worker runtime poisoned");
@@ -720,8 +941,15 @@ pub fn stop_worker(app: AppHandle, manager: tauri::State<'_, WorkerManager>) -> 
         runtime.metrics.heartbeat_latency_ms = 0;
         let mut events = runtime.set_status(WorkerStatus::Offline);
         let log = runtime.push_log(LogLevel::Warning, "Worker stopped by owner.");
-        events.push(RuntimeEvent::MetricsUpdated(MetricsUpdateEvent { event_type: "metrics_updated", metrics: runtime.metrics.clone() }));
-        events.push(RuntimeEvent::LogEmitted(ActivityLogEvent { event_type: "log_emitted", log, job_id: None }));
+        events.push(RuntimeEvent::MetricsUpdated(MetricsUpdateEvent {
+            event_type: "metrics_updated",
+            metrics: runtime.metrics.clone(),
+        }));
+        events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
+            event_type: "log_emitted",
+            log,
+            job_id: None,
+        }));
         events
     };
     emit_events(&app, events);
@@ -730,15 +958,25 @@ pub fn stop_worker(app: AppHandle, manager: tauri::State<'_, WorkerManager>) -> 
 }
 
 #[tauri::command]
-pub fn pause_worker(app: AppHandle, manager: tauri::State<'_, WorkerManager>) -> WorkerRuntimeSnapshot {
+pub fn pause_worker(
+    app: AppHandle,
+    manager: tauri::State<'_, WorkerManager>,
+) -> WorkerRuntimeSnapshot {
     let events = {
         let mut runtime = manager.runtime.lock().expect("worker runtime poisoned");
         if let Some(job) = &mut runtime.active_job {
             job.status = JobStatus::Paused;
         }
         let mut events = runtime.set_status(WorkerStatus::Paused);
-        let log = runtime.push_log(LogLevel::Warning, "Worker paused. No new jobs will be accepted.");
-        events.push(RuntimeEvent::LogEmitted(ActivityLogEvent { event_type: "log_emitted", log, job_id: None }));
+        let log = runtime.push_log(
+            LogLevel::Warning,
+            "Worker paused. No new jobs will be accepted.",
+        );
+        events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
+            event_type: "log_emitted",
+            log,
+            job_id: None,
+        }));
         events
     };
     emit_events(&app, events);
@@ -747,16 +985,27 @@ pub fn pause_worker(app: AppHandle, manager: tauri::State<'_, WorkerManager>) ->
 }
 
 #[tauri::command]
-pub fn resume_worker(app: AppHandle, manager: tauri::State<'_, WorkerManager>) -> WorkerRuntimeSnapshot {
+pub fn resume_worker(
+    app: AppHandle,
+    manager: tauri::State<'_, WorkerManager>,
+) -> WorkerRuntimeSnapshot {
     let events = {
         let mut runtime = manager.runtime.lock().expect("worker runtime poisoned");
         if let Some(job) = &mut runtime.active_job {
             job.status = JobStatus::Running;
         }
-        let status = if runtime.active_job.is_some() { WorkerStatus::Busy } else { WorkerStatus::Idle };
+        let status = if runtime.active_job.is_some() {
+            WorkerStatus::Busy
+        } else {
+            WorkerStatus::Idle
+        };
         let mut events = runtime.set_status(status);
         let log = runtime.push_log(LogLevel::Success, "Worker resumed.");
-        events.push(RuntimeEvent::LogEmitted(ActivityLogEvent { event_type: "log_emitted", log, job_id: None }));
+        events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
+            event_type: "log_emitted",
+            log,
+            job_id: None,
+        }));
         events
     };
     emit_events(&app, events);
@@ -771,7 +1020,11 @@ pub fn get_worker_status(manager: tauri::State<'_, WorkerManager>) -> WorkerRunt
 }
 
 #[tauri::command]
-pub fn update_worker_settings(app: AppHandle, manager: tauri::State<'_, WorkerManager>, settings: WorkerSettings) -> WorkerRuntimeSnapshot {
+pub fn update_worker_settings(
+    app: AppHandle,
+    manager: tauri::State<'_, WorkerManager>,
+    settings: WorkerSettings,
+) -> WorkerRuntimeSnapshot {
     let events = {
         let mut runtime = manager.runtime.lock().expect("worker runtime poisoned");
         runtime.update_settings(settings)
@@ -782,7 +1035,10 @@ pub fn update_worker_settings(app: AppHandle, manager: tauri::State<'_, WorkerMa
 }
 
 #[tauri::command]
-pub fn emergency_stop(app: AppHandle, manager: tauri::State<'_, WorkerManager>) -> WorkerRuntimeSnapshot {
+pub fn emergency_stop(
+    app: AppHandle,
+    manager: tauri::State<'_, WorkerManager>,
+) -> WorkerRuntimeSnapshot {
     manager.stop_runner();
     let events = {
         let mut runtime = manager.runtime.lock().expect("worker runtime poisoned");
@@ -792,9 +1048,19 @@ pub fn emergency_stop(app: AppHandle, manager: tauri::State<'_, WorkerManager>) 
         runtime.metrics.memory_usage = 22.0;
         runtime.metrics.heartbeat_latency_ms = 0;
         let mut events = runtime.set_status(WorkerStatus::Offline);
-        let log = runtime.push_log(LogLevel::Error, "Emergency disconnect complete. Credentials remain local.");
-        events.push(RuntimeEvent::MetricsUpdated(MetricsUpdateEvent { event_type: "metrics_updated", metrics: runtime.metrics.clone() }));
-        events.push(RuntimeEvent::LogEmitted(ActivityLogEvent { event_type: "log_emitted", log, job_id: None }));
+        let log = runtime.push_log(
+            LogLevel::Error,
+            "Emergency disconnect complete. Credentials remain local.",
+        );
+        events.push(RuntimeEvent::MetricsUpdated(MetricsUpdateEvent {
+            event_type: "metrics_updated",
+            metrics: runtime.metrics.clone(),
+        }));
+        events.push(RuntimeEvent::LogEmitted(ActivityLogEvent {
+            event_type: "log_emitted",
+            log,
+            job_id: None,
+        }));
         events
     };
     emit_events(&app, events);
@@ -804,26 +1070,203 @@ pub fn emergency_stop(app: AppHandle, manager: tauri::State<'_, WorkerManager>) 
 
 fn seed_recent_jobs() -> Vec<Job> {
     vec![
-        completed_job("job-9812", "Protein fold sampling shard", JobType::Simulation, 8.72, 94, 63),
-        completed_job("job-9721", "Product image render batch", JobType::Render, 6.25, 186, 151),
-        completed_job("job-9655", "Search index compile sweep", JobType::Compile, 4.18, 390, 365),
+        completed_job(
+            "job-9812",
+            "Protein fold sampling shard",
+            JobType::Simulation,
+            8.72,
+            94,
+            63,
+        ),
+        completed_job(
+            "job-9721",
+            "Product image render batch",
+            JobType::Render,
+            6.25,
+            186,
+            151,
+        ),
+        completed_job(
+            "job-9655",
+            "Search index compile sweep",
+            JobType::Compile,
+            4.18,
+            390,
+            365,
+        ),
     ]
 }
 
-fn completed_job(id: &str, name: &str, job_type: JobType, earnings: f64, started_minutes_ago: i64, completed_minutes_ago: i64) -> Job {
+fn completed_job(
+    id: &str,
+    name: &str,
+    job_type: JobType,
+    earnings: f64,
+    started_minutes_ago: i64,
+    completed_minutes_ago: i64,
+) -> Job {
     Job {
         id: id.to_string(),
         name: name.to_string(),
         job_type,
         status: JobStatus::Completed,
         progress: 100.0,
-        started_at: Some((Utc::now() - ChronoDuration::minutes(started_minutes_ago)).to_rfc3339_opts(SecondsFormat::Millis, true)),
-        estimated_completion_at: Some((Utc::now() - ChronoDuration::minutes(completed_minutes_ago)).to_rfc3339_opts(SecondsFormat::Millis, true)),
+        started_at: Some(
+            (Utc::now() - ChronoDuration::minutes(started_minutes_ago))
+                .to_rfc3339_opts(SecondsFormat::Millis, true),
+        ),
+        estimated_completion_at: Some(
+            (Utc::now() - ChronoDuration::minutes(completed_minutes_ago))
+                .to_rfc3339_opts(SecondsFormat::Millis, true),
+        ),
         earnings,
         cpu_usage: 55.0,
         memory_usage: 39.0,
         logs: vec![],
+        execution_output: Some("Historical completed job.".to_string()),
+        execution_error: None,
     }
+}
+
+struct ScriptExecution {
+    summary: String,
+    duration_ms: u128,
+}
+
+fn execute_demo_script(
+    job_id: &str,
+    job_name: &str,
+    job_type: &JobType,
+) -> Result<ScriptExecution, String> {
+    let started = Instant::now();
+    let workspace = std::env::temp_dir().join(format!(
+        "computebnb-{}-{}",
+        sanitize_id(job_id),
+        Utc::now().timestamp_millis()
+    ));
+    fs::create_dir_all(&workspace)
+        .map_err(|error| format!("unable to create sandbox workspace: {error}"))?;
+
+    let script_name = if cfg!(windows) { "job.cmd" } else { "job.sh" };
+    let script_path = workspace.join(script_name);
+    let script = script_for_job(job_type);
+    fs::write(&script_path, script).map_err(|error| format!("unable to write script: {error}"))?;
+
+    let mut input = fs::File::create(workspace.join("input.txt"))
+        .map_err(|error| format!("unable to write input artifact: {error}"))?;
+    writeln!(input, "job_id={job_id}")
+        .map_err(|error| format!("unable to write input artifact: {error}"))?;
+    writeln!(input, "job_name={job_name}")
+        .map_err(|error| format!("unable to write input artifact: {error}"))?;
+    writeln!(input, "job_type={}", job_type_label(job_type))
+        .map_err(|error| format!("unable to write input artifact: {error}"))?;
+
+    let mut command = if cfg!(windows) {
+        let mut command = Command::new("cmd.exe");
+        command.arg("/C").arg(&script_path);
+        command
+    } else {
+        let mut command = Command::new("/bin/sh");
+        command.arg(&script_path);
+        command
+    };
+
+    let mut child = command
+        .current_dir(&workspace)
+        .env_clear()
+        .env("COMPUTEBNB_JOB_ID", job_id)
+        .env("COMPUTEBNB_JOB_NAME", job_name)
+        .env("COMPUTEBNB_JOB_TYPE", job_type_label(job_type))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("unable to spawn executor: {error}"))?;
+
+    let timeout = Duration::from_secs(4);
+    loop {
+        if child
+            .try_wait()
+            .map_err(|error| format!("executor wait failed: {error}"))?
+            .is_some()
+        {
+            let output = child
+                .wait_with_output()
+                .map_err(|error| format!("unable to read executor output: {error}"))?;
+            let _ = fs::remove_dir_all(&workspace);
+            if output.status.success() {
+                let stdout = limit_output(&String::from_utf8_lossy(&output.stdout));
+                let summary = if stdout.is_empty() {
+                    "script completed without stdout".to_string()
+                } else {
+                    stdout
+                };
+                return Ok(ScriptExecution {
+                    summary,
+                    duration_ms: started.elapsed().as_millis(),
+                });
+            }
+
+            let stderr = limit_output(&String::from_utf8_lossy(&output.stderr));
+            let message = if stderr.is_empty() {
+                format!("script exited with {}", output.status)
+            } else {
+                format!("script exited with {}: {}", output.status, stderr)
+            };
+            return Err(message);
+        }
+
+        if started.elapsed() > timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_dir_all(&workspace);
+            return Err(format!("script timed out after {}ms", timeout.as_millis()));
+        }
+
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn script_for_job(job_type: &JobType) -> &'static str {
+    if cfg!(windows) {
+        match job_type {
+            JobType::Render => "@echo off\r\nsetlocal\r\nset /a total=0\r\nfor /l %%i in (1,1,1200) do set /a total+=%%i%%97\r\necho render complete checksum=%total%\r\n",
+            JobType::Simulation => "@echo off\r\nsetlocal\r\nset /a total=0\r\nfor /l %%i in (1,1,1500) do set /a total+=%%i%%89\r\necho simulation complete checksum=%total%\r\n",
+            JobType::BatchInference => "@echo off\r\nsetlocal\r\nset /a total=0\r\nfor /l %%i in (1,1,1000) do set /a total+=%%i%%41\r\necho batch-inference complete rows=1000 checksum=%total%\r\n",
+            JobType::Compile => "@echo off\r\nsetlocal\r\nset /a total=0\r\nfor /l %%i in (1,1,900) do set /a total+=%%i%%53\r\necho compile complete units=900 checksum=%total%\r\n",
+            JobType::DataCleaning => "@echo off\r\nsetlocal\r\nset /a total=0\r\nfor /l %%i in (1,1,700) do set /a total+=%%i%%31\r\necho data-cleaning complete records=700 checksum=%total%\r\n",
+        }
+    } else {
+        match job_type {
+            JobType::Render => "set -eu\numask 077\ntotal=0\ni=1\nwhile [ \"$i\" -le 1200 ]; do total=$((total + i % 97)); i=$((i + 1)); done\nprintf 'render complete checksum=%s\\n' \"$total\"\n",
+            JobType::Simulation => "set -eu\numask 077\ntotal=0\ni=1\nwhile [ \"$i\" -le 1500 ]; do total=$((total + i % 89)); i=$((i + 1)); done\nprintf 'simulation complete checksum=%s\\n' \"$total\"\n",
+            JobType::BatchInference => "set -eu\numask 077\ntotal=0\ni=1\nwhile [ \"$i\" -le 1000 ]; do total=$((total + i % 41)); i=$((i + 1)); done\nprintf 'batch-inference complete rows=1000 checksum=%s\\n' \"$total\"\n",
+            JobType::Compile => "set -eu\numask 077\ntotal=0\ni=1\nwhile [ \"$i\" -le 900 ]; do total=$((total + i % 53)); i=$((i + 1)); done\nprintf 'compile complete units=900 checksum=%s\\n' \"$total\"\n",
+            JobType::DataCleaning => "set -eu\numask 077\ntotal=0\ni=1\nwhile [ \"$i\" -le 700 ]; do total=$((total + i % 31)); i=$((i + 1)); done\nprintf 'data-cleaning complete records=700 checksum=%s\\n' \"$total\"\n",
+        }
+    }
+}
+
+fn job_type_label(job_type: &JobType) -> &'static str {
+    match job_type {
+        JobType::Render => "render",
+        JobType::Simulation => "simulation",
+        JobType::BatchInference => "batch-inference",
+        JobType::Compile => "compile",
+        JobType::DataCleaning => "data-cleaning",
+    }
+}
+
+fn sanitize_id(value: &str) -> String {
+    value
+        .chars()
+        .filter(|item| item.is_ascii_alphanumeric() || *item == '-')
+        .collect()
+}
+
+fn limit_output(value: &str) -> String {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    normalized.chars().take(700).collect()
 }
 
 fn local_machine_name() -> String {
@@ -842,12 +1285,21 @@ fn local_os_name() -> String {
 }
 
 fn log(id: &str, level: LogLevel, message: &str) -> JobLog {
-    JobLog { id: id.to_string(), at: now(), level, message: message.to_string() }
+    JobLog {
+        id: id.to_string(),
+        at: now(),
+        level,
+        message: message.to_string(),
+    }
 }
 
 fn log_with_random_id(seed: &mut u64, level: LogLevel, message: &str) -> JobLog {
     let suffix = (next_unit(seed) * 1_000_000.0).round() as u64;
-    log(&format!("log-{}-{}", Utc::now().timestamp_millis(), suffix), level, message)
+    log(
+        &format!("log-{}-{}", Utc::now().timestamp_millis(), suffix),
+        level,
+        message,
+    )
 }
 
 fn now() -> String {
@@ -865,4 +1317,18 @@ fn clamp(value: f64, min: f64, max: f64) -> f64 {
 
 fn money(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn demo_script_executor_captures_stdout() {
+        let result = execute_demo_script("job-test", "Executor test", &JobType::Compile)
+            .expect("demo script should execute");
+
+        assert!(result.summary.contains("compile complete"));
+        assert!(result.summary.contains("checksum="));
+    }
 }

@@ -72,9 +72,13 @@ Current local behavior:
 - emits periodic heartbeats
 - simulates CPU, memory, battery, temperature, network, and latency metrics
 - assigns an auto-accepted local job after the worker is online
-- emits progress logs and resource changes
-- completes jobs, updates recent jobs, and increments earnings
+- runs a bounded local demo script for each assigned job in a temporary workspace
+- clears inherited environment variables, blocks stdin, captures stdout/stderr, enforces a short timeout, truncates output, and removes the workspace after completion
+- emits executor logs and resource changes
+- completes or fails jobs from the real local process result, updates recent jobs, and increments earnings only on success
 - supports stop, pause, resume, settings changes, and emergency stop
+
+The script runner is intentionally conservative and only executes built-in demo scripts for known job types. It is a local execution boundary, not a hardened adversarial sandbox: it does not yet provide OS-level syscall, network, container, VM, or filesystem policy enforcement beyond the temporary working directory and sanitized process environment.
 
 ## Folder Structure
 
