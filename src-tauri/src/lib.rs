@@ -4,6 +4,11 @@ mod worker_manager;
 pub fn run() {
     tauri::Builder::default()
         .manage(worker_manager::WorkerManager::new())
+        .setup(|app| {
+            let manager = app.state::<worker_manager::WorkerManager>();
+            manager.bootstrap(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             worker_manager::detect_machine,
             worker_manager::register_machine,

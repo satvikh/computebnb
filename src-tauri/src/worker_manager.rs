@@ -121,6 +121,10 @@ impl WorkerManager {
         }));
     }
 
+    pub fn bootstrap(&self, app: AppHandle) {
+        self.ensure_runner(app);
+    }
+
     fn stop_runner(&self) {
         if let Some(task) = self.task.lock().expect("worker task poisoned").take() {
             task.abort();
