@@ -138,7 +138,7 @@ export async function assignNextJob(): Promise<IAssignment | null> {
     throw caught;
   });
 
-  claimed.assignedProviderId = String(provider._id);
+  claimed.assignedProviderId = provider._id;
   await claimed.save();
 
   // 5. Log the event

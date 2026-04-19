@@ -10,6 +10,10 @@ const globalForMongoose = globalThis as typeof globalThis & {
   _mongoosePromise?: Promise<typeof mongoose>;
 };
 
+export function isDbConfigured() {
+  return Boolean(MONGODB_URI);
+}
+
 export default async function dbConnect() {
   if (!MONGODB_URI) {
     throw new Error(

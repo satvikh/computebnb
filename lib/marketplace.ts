@@ -57,7 +57,7 @@ export function formatJob(
     error?: string | null;
     failureReason?: string | null;
     budgetCents: number;
-    assignedProviderId?: string | null;
+    assignedProviderId?: unknown;
     retryCount?: number;
     startedAt?: Date | null;
     completedAt?: Date | null;
@@ -83,7 +83,7 @@ export function formatJob(
     error: job.error ?? null,
     failureReason: job.failureReason ?? null,
     budgetCents: job.budgetCents,
-    assignedProviderId: job.assignedProviderId ?? null,
+    assignedProviderId: job.assignedProviderId ? String(job.assignedProviderId) : null,
     assignedProviderName: assignedProviderName ?? null,
     retryCount: job.retryCount ?? 0,
     startedAt: job.startedAt ?? null,
@@ -109,7 +109,7 @@ export async function getDashboardSummary() {
 
   const providerIds = Array.from(
     new Set([
-      ...jobs.map((job) => job.assignedProviderId).filter(Boolean),
+      ...jobs.map((job) => job.assignedProviderId).filter(Boolean).map(String),
       ...events.map((event) => event.providerId?.toString()).filter(Boolean)
     ])
   ) as string[];
@@ -124,7 +124,7 @@ export async function getDashboardSummary() {
 
   const providerSummary = providers.map(formatProvider);
   const jobSummary = jobs.map((job) =>
-    formatJob(job, job.assignedProviderId ? providerLookup.get(job.assignedProviderId) ?? null : null)
+    formatJob(job, job.assignedProviderId ? providerLookup.get(String(job.assignedProviderId)) ?? null : null)
   );
 
   const totalProviderPayoutCents = jobs.reduce((sum, job) => sum + (job.providerPayoutCents ?? 0), 0);
@@ -172,7 +172,7 @@ export async function listProvidersSummary() {
 export async function listJobsSummary() {
   await dbConnect();
   const jobs = await Job.find().sort({ createdAt: -1 }).lean();
-  const providerIds = Array.from(new Set(jobs.map((job) => job.assignedProviderId).filter(Boolean))) as string[];
+  const providerIds = Array.from(new Set(jobs.map((job) => job.assignedProviderId).filter(Boolean).map(String)));
   const providerLookup = new Map(
     (
       providerIds.length
@@ -182,7 +182,7 @@ export async function listJobsSummary() {
   );
 
   return jobs.map((job) =>
-    formatJob(job, job.assignedProviderId ? providerLookup.get(job.assignedProviderId) ?? null : null)
+    formatJob(job, job.assignedProviderId ? providerLookup.get(String(job.assignedProviderId)) ?? null : null)
   );
 }
 

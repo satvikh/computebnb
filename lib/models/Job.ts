@@ -13,6 +13,7 @@ export interface IJob extends Document {
   result?: string;
   error?: string;
   budgetCents: number;
+  jobCostCents?: number;
   providerPayoutCents?: number;
   platformFeeCents?: number;
   assignedProviderId?: Types.ObjectId;
@@ -45,6 +46,7 @@ const JobSchema = new Schema<IJob>(
     result: { type: String },
     error: { type: String },
     budgetCents: { type: Number, default: 500 },
+    jobCostCents: { type: Number },
     providerPayoutCents: { type: Number },
     platformFeeCents: { type: Number },
     assignedProviderId: { type: Schema.Types.ObjectId, ref: "Provider" },
