@@ -1717,7 +1717,7 @@ fn sync_active_execution(
     if !stderr_delta.trim().is_empty() {
         progress_payload.insert("stderr".to_string(), Value::String(limit_output(&stderr_delta)));
     }
-    if let Err(error) = patch_json::<Value>(
+    if let Err(error) = patch_json::<Value, Value>(
         http,
         &format!("{}/api/jobs/{}/progress", runtime.api_url, execution.remote_job_id),
         auth_headers(&session)?,
