@@ -21,7 +21,6 @@ export default function ProviderDashboardPage() {
 
           <div className="mt-4 rounded-xl border border-lime-300/15 bg-lime-300/10 p-4 text-sm text-lime-100">
             Suggested payout rate: <span className="font-semibold text-lime-300">{formatUsdFromCents(DEFAULT_MACHINE_HOURLY_RATE_CENTS)}/hour</span>.
-            Completed jobs settle into the local payment ledger automatically for this MVP.
           </div>
 
           <div className="mt-8 flex gap-3">

@@ -1,0 +1,22 @@
+{
+  "type": "python_script",
+  "script": "import runpy\nimport sys\nimport pathlib\nsource = pathlib.Path('/workspace/samples/images/python-runner/spectral_market_solver.py')\nsys.argv = [str(source), sys.argv[1]]\nrunpy.run_path(str(source), run_name='__main__')\n",
+  "input": {
+    "gridSize": 28,
+    "rank": 18,
+    "powerSteps": 18,
+    "cgSteps": 20,
+    "diffusionSteps": 24,
+    "monteCarloSamples": 1200,
+    "reaction": 0.9,
+    "phase": 0.6180339887,
+    "skew": 1.4142135623,
+    "seed": 20260419
+  },
+  "limits": {
+    "timeoutMs": 20000,
+    "cpus": 1,
+    "memoryMb": 256,
+    "pidsLimit": 64
+  }
+}

@@ -15,7 +15,6 @@ export default function ProviderSetupPage() {
         <h1 className="mt-4 text-4xl font-semibold">Configure this machine for Python jobs</h1>
         <div className="mt-4 rounded-xl border border-lime-300/20 bg-lime-300/10 px-4 py-3 text-sm text-lime-100">
           Suggested payout rate: <span className="font-semibold text-lime-300">{formatUsdFromCents(DEFAULT_MACHINE_HOURLY_RATE_CENTS)}/hour</span>.
-          This MVP uses a simulated off-chain payout ledger and keeps the rate fixed for now.
         </div>
         <div className="mt-8 grid gap-4">
           <input

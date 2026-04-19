@@ -118,116 +118,174 @@ function NewJobPageContent() {
   }
 
   if (loading) {
-    return <main className="min-h-screen bg-zinc-950 p-8 text-white">Loading…</main>;
+    return <main className="gpu-root min-h-screen bg-[#f4f1ea] p-8 text-[#141410]">Loading…</main>;
   }
 
   return (
-    <main className="min-h-screen bg-zinc-950 px-6 py-10 text-white">
-      <div className="mx-auto max-w-5xl">
-        <div className="mb-6 flex items-center justify-between">
+    <main className="gpu-root min-h-screen bg-[#f4f1ea] text-[#141410]">
+      <div className="mx-auto max-w-[1520px] px-4 py-5 lg:px-5">
+        <div className="mb-5 flex flex-col gap-4 border-b border-black/12 pb-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <p className="text-sm uppercase tracking-[0.2em] text-zinc-400">Submit job</p>
-            <h1 className="mt-3 text-4xl font-semibold">Paste Python and run it on a selected machine</h1>
+            <p className="eyebrow">$ submit job · single python file · manual machine select</p>
+            <h1 className="mt-3 text-[48px] font-semibold leading-[0.95] tracking-[-0.07em] sm:text-[62px]">
+              Submit a script. <span className="serif text-[0.86em] tracking-[-0.04em]">Keep it simple, send it clean.</span>
+            </h1>
+            <p className="mt-4 max-w-[720px] text-[18px] leading-7 text-black/56">
+              Signed in as {user?.displayName ?? user?.email ?? user?.username}. Choose one machine, upload one <span className="mono text-[0.9em]">.py</span> file or paste code, then the selected producer runs it in Docker.
+            </p>
           </div>
-          <Link href="/machines" className="rounded-md border border-white/10 px-4 py-2 text-sm text-zinc-200">
-            Back to machines
+          <Link href="/machines" className="mono inline-flex h-[42px] items-center border border-black/35 bg-white/30 px-4 text-[11px] uppercase tracking-[0.14em] text-black/66">
+            ← back to marketplace
           </Link>
         </div>
 
-        <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-          <form onSubmit={handleSubmit} className="rounded-xl border border-white/10 bg-white/5 p-6">
-            <div className="grid gap-4">
-              <label className="text-sm text-zinc-300">
-                <span className="mb-2 block">Machine</span>
-                <select
-                  className="h-12 w-full rounded-md border border-white/10 bg-black/30 px-4 text-white"
-                  value={machineId}
-                  onChange={(event) => setMachineId(event.target.value)}
-                  required
-                >
-                  <option value="" disabled>
-                    Select machine
-                  </option>
-                  {machines.map((machine) => (
-                    <option key={machine.id} value={machine.id}>
-                      {machine.name} | {machine.gpu} | {machine.ramGb} GB | {formatUsdFromCents(machine.hourlyRateCents)}/hr | {machine.status}
+        <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_360px]">
+          <form onSubmit={handleSubmit} className="border border-black/30 bg-[#f6f2e8] p-5 shadow-[inset_0_0_0_1px_rgba(20,20,16,0.04)]">
+            <div className="grid gap-5">
+              <div className="grid gap-5 md:grid-cols-[1.2fr_1.4fr]">
+                <label className="border border-black/18 bg-white/18 text-sm text-black/68">
+                  <span className="eyebrow block border-b border-black/12 px-4 py-3">Machine</span>
+                  <select
+                    className="h-[58px] w-full rounded-none border-0 bg-transparent px-4 text-[14px] text-black"
+                    value={machineId}
+                    onChange={(event) => setMachineId(event.target.value)}
+                    required
+                  >
+                    <option value="" disabled>
+                      Select machine
                     </option>
-                  ))}
-                </select>
-              </label>
+                    {machines.map((machine) => (
+                      <option key={machine.id} value={machine.id}>
+                        {machine.name} | {machine.gpu} | {machine.ramGb} GB | {formatUsdFromCents(machine.hourlyRateCents)}/hr | {machine.status}
+                      </option>
+                    ))}
+                  </select>
+                </label>
 
-              <div className="grid gap-4 sm:grid-cols-2">
-                <label className="text-sm text-zinc-300">
-                  <span className="mb-2 block">Filename</span>
-                  <input
-                    className="h-12 w-full rounded-md border border-white/10 bg-black/30 px-4 text-white"
-                    value={filename}
-                    onChange={(event) => setFilename(event.target.value)}
-                  />
-                </label>
-                <label className="text-sm text-zinc-300">
-                  <span className="mb-2 block">Timeout seconds</span>
-                  <input
-                    type="number"
-                    min={1}
-                    className="h-12 w-full rounded-md border border-white/10 bg-black/30 px-4 text-white"
-                    value={timeoutSeconds}
-                    onChange={(event) => setTimeoutSeconds(event.target.value)}
-                  />
-                </label>
+                <div className="grid gap-0 border border-black/18 bg-white/18 md:grid-cols-[1fr_0.7fr]">
+                  <label className="text-sm text-black/68">
+                    <span className="eyebrow block border-b border-black/12 px-4 py-3">Filename</span>
+                    <input
+                      className="h-[58px] w-full rounded-none border-0 bg-transparent px-4 text-[14px] text-black placeholder:text-black/28"
+                      value={filename}
+                      onChange={(event) => setFilename(event.target.value)}
+                    />
+                  </label>
+
+                  <label className="border-l border-black/12 text-sm text-black/68">
+                    <span className="eyebrow block border-b border-black/12 px-4 py-3">Timeout</span>
+                    <input
+                      type="number"
+                      min={1}
+                      className="h-[58px] w-full rounded-none border-0 bg-transparent px-4 text-[14px] text-black"
+                      value={timeoutSeconds}
+                      onChange={(event) => setTimeoutSeconds(event.target.value)}
+                    />
+                  </label>
+                </div>
               </div>
 
-              <label className="text-sm text-zinc-300">
-                <span className="mb-2 block">Upload .py</span>
-                <input
-                  type="file"
-                  accept=".py"
-                  className="block w-full text-sm text-zinc-300"
-                  onChange={(event) => void handleUpload(event.target.files?.[0] ?? null)}
-                />
-              </label>
+              <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_280px]">
+                <label className="text-sm text-black/68">
+                  <span className="eyebrow block border border-b-0 border-black/18 bg-white/18 px-4 py-3">Python code</span>
+                  <textarea
+                    className="min-h-[470px] w-full rounded-none border border-black/18 bg-white/10 px-4 py-4 font-mono text-[14px] text-black"
+                    value={code}
+                    onChange={(event) => setCode(event.target.value)}
+                    spellCheck={false}
+                  />
+                </label>
 
-              <label className="text-sm text-zinc-300">
-                <span className="mb-2 block">Python code</span>
-                <textarea
-                  className="min-h-[320px] w-full rounded-md border border-white/10 bg-black/30 px-4 py-3 font-mono text-sm text-white"
-                  value={code}
-                  onChange={(event) => setCode(event.target.value)}
-                  spellCheck={false}
-                />
-              </label>
+                <div className="space-y-5">
+                  <section className="border border-black/20 bg-white/24 p-4">
+                    <p className="eyebrow">Upload</p>
+                    <input
+                      type="file"
+                      accept=".py"
+                      className="mt-4 block w-full text-sm text-black/62 file:mr-3 file:border file:border-black/25 file:bg-[#171611] file:px-3 file:py-2 file:text-[11px] file:uppercase file:tracking-[0.14em] file:text-[#f4f1ea]"
+                      onChange={(event) => void handleUpload(event.target.files?.[0] ?? null)}
+                    />
+                    <p className="mt-4 text-[13px] leading-6 text-black/52">
+                      One file only. The backend stores the Python source directly with the job for this MVP.
+                    </p>
+                  </section>
+
+                  <section className="border border-black/20 bg-white/24 p-4">
+                    <p className="eyebrow">Execution notes</p>
+                    <div className="mt-4 space-y-3 text-[13px] leading-6 text-black/56">
+                      <p>Runs in a basic Python Docker image.</p>
+                      <p>One job at a time per machine.</p>
+                      <p>Output returns as stdout, stderr, and exit code.</p>
+                      <p>No dependencies or package installs in this flow.</p>
+                    </div>
+                  </section>
+
+                  <section className="border border-black/20 bg-[#171611] p-4 text-[#f4f1ea]">
+                    <p className="eyebrow text-white/38">Dispatch</p>
+                    <div className="mono mt-4 space-y-2 text-[11px] uppercase tracking-[0.13em] text-white/54">
+                      <div className="flex justify-between"><span>selected machine</span><span>{selectedMachine?.name ?? "pending"}</span></div>
+                      <div className="flex justify-between"><span>pricing</span><span>{selectedMachine ? `${formatUsdFromCents(selectedMachine.hourlyRateCents)}/hour` : "pending"}</span></div>
+                      <div className="flex justify-between"><span>timeout</span><span>{timeoutSeconds}s</span></div>
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={submitting}
+                      className="mt-5 flex h-[58px] w-full items-center justify-center border border-[#b9f031] bg-[#c8f13d] px-4 text-[15px] font-semibold text-[#171611] disabled:opacity-70"
+                    >
+                      {submitting ? "Submitting…" : "Create job →"}
+                    </button>
+                  </section>
+                </div>
+              </div>
 
               {error ? (
-                <div className="rounded-md border border-rose-400/30 bg-rose-400/10 px-4 py-3 text-sm text-rose-200">
+                <div className="border border-[#c4352b]/40 bg-[#c4352b]/8 px-4 py-3 text-[13px] text-[#8f251d]">
                   {error}
                 </div>
               ) : null}
-
-              <button
-                type="submit"
-                disabled={submitting}
-                className="h-12 rounded-md bg-lime-300 font-medium text-zinc-950 disabled:opacity-70"
-              >
-                {submitting ? "Submitting..." : "Create job"}
-              </button>
             </div>
           </form>
 
-          <aside className="rounded-xl border border-white/10 bg-white/5 p-6">
-            <p className="text-sm uppercase tracking-[0.2em] text-zinc-400">Selected machine</p>
+          <aside className="border border-black/85 bg-[#171611] p-5 text-[#f4f1ea]">
+            <p className="eyebrow flex items-center gap-2 text-white/45">
+              <span className="dot live animated" />
+              Selected machine
+            </p>
             {selectedMachine ? (
               <>
-                <h2 className="mt-4 text-2xl font-semibold">{selectedMachine.name}</h2>
-                <div className="mt-4 space-y-2 text-sm text-zinc-300">
-                  <p>CPU: {selectedMachine.cpu}</p>
-                  <p>GPU: {selectedMachine.gpu}</p>
-                  <p>RAM: {selectedMachine.ramGb} GB</p>
-                  <p>Price: {formatUsdFromCents(selectedMachine.hourlyRateCents)}/hour</p>
-                  <p>Status: {selectedMachine.status}</p>
+                <h2 className="mt-5 text-[40px] font-semibold leading-[0.96] tracking-[-0.07em]">{selectedMachine.name}</h2>
+                <p className="mono mt-3 text-[10px] uppercase tracking-[0.14em] text-white/34">
+                  {selectedMachine.gpu} · {selectedMachine.ramGb} GB · docker-backed python
+                </p>
+
+                <div className="mt-7 grid grid-cols-2 gap-4 border-b border-white/10 pb-6">
+                  <DetailStat label="Price" value={formatUsdFromCents(selectedMachine.hourlyRateCents)} sub="/ hour" />
+                  <DetailStat label="Status" value={selectedMachine.status} sub="marketplace live" />
+                  <DetailStat label="CPU" value={selectedMachine.cpu} sub="host class" />
+                  <DetailStat label="GPU" value={selectedMachine.gpu} sub="reported spec" />
+                </div>
+
+                <div className="mt-7 border-b border-white/10 pb-6">
+                  <p className="eyebrow text-white/35">What happens next</p>
+                  <div className="mono mt-4 space-y-2 text-[11px] uppercase tracking-[0.13em] text-white/56">
+                    <div className="flex gap-3"><span className="text-white/30">01</span><span>job stored in backend</span></div>
+                    <div className="flex gap-3"><span className="text-white/30">02</span><span>producer polls every few seconds</span></div>
+                    <div className="flex gap-3"><span className="text-white/30">03</span><span>docker runs python script</span></div>
+                    <div className="flex gap-3"><span className="text-white/30">04</span><span>stdout + stderr written back</span></div>
+                  </div>
+                </div>
+
+                <div className="mt-7">
+                  <p className="eyebrow text-white/35">Preview</p>
+                  <pre className="mono mt-4 whitespace-pre-wrap text-[11px] leading-6 text-white/62">{`POST /api/jobs
+machineId=${selectedMachine.id}
+filename=${filename}
+timeoutSeconds=${timeoutSeconds}
+budget=${formatUsdFromCents(500)} ceiling`}</pre>
                 </div>
               </>
             ) : (
-              <p className="mt-4 text-sm text-zinc-400">Choose a machine to submit the job.</p>
+              <p className="mt-4 text-sm text-white/48">Choose a machine to submit the job.</p>
             )}
           </aside>
         </div>
@@ -236,9 +294,19 @@ function NewJobPageContent() {
   );
 }
 
+function DetailStat({ label, value, sub }: { label: string; value: string; sub: string }) {
+  return (
+    <div>
+      <p className="eyebrow text-white/32">{label}</p>
+      <p className="mt-2 text-[22px] font-semibold tracking-[-0.05em]">{value}</p>
+      <p className="mt-1 text-[11px] text-white/38">{sub}</p>
+    </div>
+  );
+}
+
 export default function NewJobPage() {
   return (
-    <Suspense fallback={<main className="min-h-screen bg-zinc-950 p-8 text-white">Loading…</main>}>
+    <Suspense fallback={<main className="gpu-root min-h-screen bg-[#f4f1ea] p-8 text-[#141410]">Loading…</main>}>
       <NewJobPageContent />
     </Suspense>
   );
