@@ -1,73 +1,66 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import dbConnect from "@/lib/db";
+import { formatJob, getDbUnavailablePayload } from "@/lib/marketplace";
 import { Provider, Job } from "@/lib/models";
-import { getAssignmentForProvider, assignNextJob } from "@/lib/scheduling";
+import { getAssignmentForProvider, assignNextJob, reapStaleAssignments } from "@/lib/scheduling";
 
 const schema = z.object({
   providerId: z.string().min(1),
 });
 
 export async function POST(request: Request) {
-  await dbConnect();
-  // TODO: Enforce one active assignment per provider in MongoDB with an atomic update.
-  const input = schema.parse(await request.json());
+  try {
+    await dbConnect();
+    await reapStaleAssignments();
+    const input = schema.parse(await request.json());
 
-  // Heartbeat the provider
-  const provider = await Provider.findByIdAndUpdate(
-    input.providerId,
-    { $set: { lastHeartbeatAt: new Date() } },
-    { new: true }
-  );
-  if (!provider) {
-    return NextResponse.json({ error: "Provider not found" }, { status: 404 });
-  }
-
-  // Keep online unless busy
-  if (provider.status !== "busy") {
-    provider.status = "online";
-    await provider.save();
-  }
-
-  // Check for existing active assignment
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let assignment: any = await getAssignmentForProvider(input.providerId);
-
-  // If no active assignment, try to schedule one
-  if (!assignment) {
-    const newAssignment = await assignNextJob();
-    if (newAssignment && newAssignment.providerId.toString() === input.providerId) {
-      assignment = newAssignment;
+    const provider = await Provider.findByIdAndUpdate(
+      input.providerId,
+      { $set: { lastHeartbeatAt: new Date() } },
+      { new: true }
+    );
+    if (!provider) {
+      return NextResponse.json({ error: "Provider not found" }, { status: 404 });
     }
+
+    if (provider.status !== "busy") {
+      provider.status = "online";
+      await provider.save();
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let assignment: any = await getAssignmentForProvider(input.providerId);
+
+    if (!assignment) {
+      const newAssignment = await assignNextJob();
+      if (newAssignment && newAssignment.providerId.toString() === input.providerId) {
+        assignment = newAssignment;
+      }
+    }
+
+    if (!assignment) {
+      return NextResponse.json({ assignment: null, job: null });
+    }
+
+    const job = await Job.findById(assignment.jobId).lean();
+
+    return NextResponse.json({
+      assignment: {
+        id: String(assignment._id),
+        jobId: String(assignment.jobId),
+        providerId: String(assignment.providerId),
+        status: assignment.status,
+        startedAt: assignment.startedAt,
+        completedAt: assignment.completedAt,
+        createdAt: assignment.createdAt
+      },
+      job: job ? formatJob(job) : null
+    });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("MONGODB_URI")) {
+      return NextResponse.json(getDbUnavailablePayload(), { status: 503 });
+    }
+    return NextResponse.json({ error: "Failed to poll for work" }, { status: 500 });
   }
-
-  if (!assignment) {
-    return NextResponse.json({ assignment: null, job: null });
-  }
-
-  const job = await Job.findById(assignment.jobId).lean();
-
-  return NextResponse.json({
-    assignment: {
-      id: assignment._id,
-      jobId: assignment.jobId,
-      providerId: assignment.providerId,
-      status: assignment.status,
-      startedAt: assignment.startedAt,
-      completedAt: assignment.completedAt,
-      createdAt: assignment.createdAt,
-    },
-    job: job
-      ? {
-          id: job._id,
-          title: job.title,
-          type: job.type,
-          status: job.status,
-          input: job.input,
-          budgetCents: job.budgetCents,
-          createdAt: job.createdAt,
-          updatedAt: job.updatedAt,
-        }
-      : null,
-  });
 }

@@ -2,51 +2,56 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import dbConnect from "@/lib/db";
 import { Job, Assignment, JobEvent } from "@/lib/models";
+import { formatJob, getDbUnavailablePayload } from "@/lib/marketplace";
 
 const schema = z.object({
-  providerId: z.string().optional(),
+  providerId: z.string().min(1),
 });
 
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  await dbConnect();
-  const { id } = await params;
-  const input = schema.parse(await request.json().catch(() => ({})));
+  try {
+    await dbConnect();
+    const { id } = await params;
+    const input = schema.parse(await request.json().catch(() => ({})));
 
-  const job = await Job.findByIdAndUpdate(
-    id,
-    { $set: { status: "running" } },
-    { new: true }
-  );
-  if (!job) {
-    return NextResponse.json({ error: "Job not found" }, { status: 404 });
+    const assignment = await Assignment.findOne({
+      jobId: id,
+      providerId: input.providerId,
+      status: "assigned"
+    });
+    if (!assignment) {
+      return NextResponse.json({ error: "Assigned provider mismatch" }, { status: 403 });
+    }
+
+    const startedAt = new Date();
+    assignment.status = "running";
+    assignment.startedAt = startedAt;
+    await assignment.save();
+
+    const job = await Job.findByIdAndUpdate(
+      id,
+      { $set: { status: "running", startedAt } },
+      { new: true }
+    );
+    if (!job) {
+      return NextResponse.json({ error: "Job not found" }, { status: 404 });
+    }
+
+    await JobEvent.create({
+      jobId: id,
+      providerId: input.providerId,
+      type: "started",
+      message: "Worker started execution"
+    });
+
+    return NextResponse.json({ job: formatJob(job) });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("MONGODB_URI")) {
+      return NextResponse.json(getDbUnavailablePayload(), { status: 503 });
+    }
+    return NextResponse.json({ error: "Failed to start job" }, { status: 500 });
   }
-
-  // Update the assignment's startedAt and status
-  await Assignment.findOneAndUpdate(
-    { jobId: id, status: "assigned" },
-    { $set: { status: "running", startedAt: new Date() } }
-  );
-
-  await JobEvent.create({
-    jobId: id,
-    providerId: input.providerId || undefined,
-    type: "started",
-    message: "Worker started execution",
-  });
-
-  return NextResponse.json({
-    job: {
-      id: job._id,
-      title: job.title,
-      type: job.type,
-      status: job.status,
-      input: job.input,
-      budgetCents: job.budgetCents,
-      createdAt: job.createdAt,
-      updatedAt: job.updatedAt,
-    },
-  });
 }

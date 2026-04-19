@@ -1,7 +1,93 @@
 import { Provider, Job, Assignment, JobEvent } from "@/lib/models";
 import type { IAssignment } from "@/lib/models";
+import { HEARTBEAT_STALE_MS, MAX_JOB_RETRIES } from "@/lib/marketplace";
 
-const HEARTBEAT_STALE_MS = 30_000; // 30 seconds
+async function requeueOrFailJob(jobId: string, providerId: string | null, reason: string) {
+  const job = await Job.findById(jobId);
+  if (!job) return;
+
+  const nextRetryCount = (job.retryCount ?? 0) + 1;
+  const shouldRetry = nextRetryCount <= MAX_JOB_RETRIES;
+
+  if (providerId) {
+    await Provider.findByIdAndUpdate(providerId, { $set: { status: "offline" }, $inc: { failedJobs: 1 } });
+    const provider = await Provider.findById(providerId).lean();
+    if (provider) {
+      const total = (provider.completedJobs ?? 0) + (provider.failedJobs ?? 0);
+      const successRate = total === 0 ? 100 : Number((((provider.completedJobs ?? 0) / total) * 100).toFixed(1));
+      await Provider.findByIdAndUpdate(providerId, { $set: { successRate } });
+    }
+  }
+
+  await Assignment.findOneAndDelete({ jobId });
+
+  await JobEvent.create({
+    jobId,
+    providerId: providerId || undefined,
+    type: "failed",
+    message: reason
+  });
+
+  if (shouldRetry) {
+    await Job.findByIdAndUpdate(jobId, {
+      $set: {
+        status: "queued",
+        failureReason: reason,
+        error: reason
+      },
+      $inc: {
+        retryCount: 1
+      },
+      $unset: {
+        assignedProviderId: 1,
+        startedAt: 1,
+        completedAt: 1,
+        actualRuntimeSeconds: 1
+      }
+    });
+
+    await JobEvent.create({
+      jobId,
+      type: "created",
+      message: `Requeued after failure: ${reason}`
+    });
+    return;
+  }
+
+  await Job.findByIdAndUpdate(jobId, {
+    $set: {
+      status: "failed",
+      failureReason: reason,
+      error: reason,
+      completedAt: new Date()
+    },
+    $inc: {
+      retryCount: 1
+    }
+  });
+}
+
+export async function reapStaleAssignments() {
+  const heartbeatCutoff = new Date(Date.now() - HEARTBEAT_STALE_MS);
+  const staleAssignments = await Assignment.find({
+    status: { $in: ["assigned", "running"] },
+    updatedAt: { $lte: heartbeatCutoff }
+  }).lean();
+
+  for (const assignment of staleAssignments) {
+    const provider = await Provider.findById(assignment.providerId).lean();
+    const lastHeartbeatAt = provider?.lastHeartbeatAt?.getTime() ?? 0;
+    if (lastHeartbeatAt && lastHeartbeatAt >= heartbeatCutoff.getTime()) {
+      continue;
+    }
+
+    await requeueOrFailJob(
+      String(assignment.jobId),
+      provider ? String(provider._id) : null,
+      "Provider heartbeat timed out during execution"
+    );
+  }
+}
 
 /**
  * Simple hackathon scheduler: pick the first compatible idle provider
@@ -10,6 +96,8 @@ const HEARTBEAT_STALE_MS = 30_000; // 30 seconds
  * Uses atomic findOneAndUpdate calls to avoid double-assigning.
  */
 export async function assignNextJob(): Promise<IAssignment | null> {
+  await reapStaleAssignments();
+
   // 1. Find the first queued job
   const job = await Job.findOne({ status: "queued" }).sort({ createdAt: 1 });
   if (!job) return null;
@@ -45,6 +133,9 @@ export async function assignNextJob(): Promise<IAssignment | null> {
     providerId: provider._id,
     status: "assigned",
   });
+
+  claimed.assignedProviderId = String(provider._id);
+  await claimed.save();
 
   // 5. Log the event
   await JobEvent.create({

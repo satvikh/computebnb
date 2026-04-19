@@ -1,35 +1,90 @@
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { StatusPill } from "@/components/status-pill";
-import { centsToDollars } from "@/lib/utils";
-import { store } from "@/lib/mock-store";
+import { MarketplaceShell } from "@/app/_components/marketplace-shell";
+import { StatusPill } from "@/app/_components/chrome";
+import { listProvidersSummary } from "@/lib/marketplace";
+import { isDbConfigured } from "@/lib/db";
+
+function centsToDollars(cents: number) {
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
+}
 
 export const dynamic = "force-dynamic";
 
-export default function ProvidersPage() {
-  const providers = store.listProviders();
+export default async function ProvidersPage() {
+  let providers: Awaited<ReturnType<typeof listProvidersSummary>> = [];
+
+  try {
+    if (isDbConfigured()) {
+      providers = await listProvidersSummary();
+    }
+  } catch {
+    providers = [];
+  }
 
   return (
-    <main className="mx-auto max-w-6xl px-4 py-10">
-      <h1 className="text-3xl font-bold">Providers</h1>
-      <p className="mt-2 text-muted-foreground">Machines running the local GPUbnb CLI agent.</p>
-      <div className="mt-6 grid gap-4 md:grid-cols-2">
-        {providers.map((provider) => (
-          <Card key={provider.id}>
-            <CardHeader>
-              <div className="flex items-center justify-between gap-3">
-                <CardTitle>{provider.name}</CardTitle>
-                <StatusPill status={provider.status} />
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-3 text-sm">
-              <p>Capabilities: {provider.capabilities.join(", ")}</p>
-              <p>Rate: {centsToDollars(provider.hourlyRateCents)} / hour</p>
-              <p>Earned: {centsToDollars(provider.totalEarnedCents)}</p>
-              <p className="text-muted-foreground">Last heartbeat: {provider.lastHeartbeatAt ?? "never"}</p>
-            </CardContent>
-          </Card>
-        ))}
+    <MarketplaceShell page="dashboard">
+      <div style={{ padding: "24px", borderBottom: "1px solid var(--rule-soft)", display: "flex", justifyContent: "space-between", alignItems: "end", gap: 24 }}>
+        <div>
+          <div className="eyebrow" style={{ marginBottom: 6 }}>§ Supply roster</div>
+          <h1 style={{ fontFamily: "var(--font-ui)", fontSize: 48, fontWeight: 500, lineHeight: 0.96, margin: 0 }}>
+            One machine worth listing.
+            <br />
+            <span className="serif" style={{ fontSize: 48, color: "var(--ink-3)" }}>Then an entire fleet.</span>
+          </h1>
+        </div>
+        <div style={{ maxWidth: 360, fontSize: 14, lineHeight: 1.7, color: "var(--ink-3)" }}>
+          Live provider inventory with rate, payout history, heartbeat freshness, and reliability signals pulled from the marketplace backend.
+        </div>
       </div>
-    </main>
+
+      <div style={{ padding: "24px", display: "grid", gap: 14 }}>
+        {providers.map((provider) => (
+          <div key={provider.id} style={{ border: "1px solid var(--rule-soft)", background: "var(--paper-2)", padding: 18 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1.2fr 0.9fr 0.9fr 0.9fr 0.8fr", gap: 18, alignItems: "center" }}>
+              <div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ fontFamily: "var(--font-ui)", fontSize: 28, fontWeight: 500 }}>{provider.name}</div>
+                  <StatusPill state={provider.status === "busy" ? "running" : provider.status === "online" ? "live" : "idle"}>
+                    {provider.status}
+                  </StatusPill>
+                </div>
+                <div className="mono" style={{ marginTop: 8, fontSize: 11, color: "var(--ink-3)" }}>
+                  {provider.capabilities.join(" · ")}
+                </div>
+              </div>
+              <Metric label="Spot rate" value={`${centsToDollars(provider.hourlyRateCents)}/hr`} />
+              <Metric label="Total earned" value={centsToDollars(provider.totalEarnedCents)} />
+              <Metric label="Trust" value={`${provider.successRate}% success`} />
+              <Metric label="Heartbeat" value={provider.lastHeartbeatAt ? "fresh" : "missing"} />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 12, marginTop: 18, paddingTop: 14, borderTop: "1px dashed var(--rule-soft)", fontFamily: "var(--font-mono)", fontSize: 11 }}>
+              <Metric label="Completed" value={String(provider.completedJobs)} />
+              <Metric label="Failed" value={String(provider.failedJobs)} />
+              <Metric label="Status lane" value={provider.status === "busy" ? "receiving jobs" : provider.status === "online" ? "open to match" : "needs heartbeat"} />
+              <Metric label="Machine class" value={provider.capabilities[0] ?? "node"} />
+            </div>
+          </div>
+        ))}
+
+        {!providers.length && (
+          <div style={{ border: "1px solid var(--rule-soft)", background: "var(--paper-2)", padding: 24 }}>
+            <div style={{ fontFamily: "var(--font-ui)", fontSize: 30, fontWeight: 500 }}>No live providers yet.</div>
+            <p style={{ margin: "12px 0 0", maxWidth: 640, fontSize: 14, lineHeight: 1.7, color: "var(--ink-3)" }}>
+              {isDbConfigured()
+                ? "Register or heartbeat a provider node to populate this marketplace roster."
+                : "Set your MongoDB environment first, then register a provider node to drive the live marketplace inventory."}
+            </p>
+          </div>
+        )}
+      </div>
+    </MarketplaceShell>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <div style={{ color: "var(--ink-3)", fontSize: 10 }}>{label}</div>
+      <div>{value}</div>
+    </div>
   );
 }

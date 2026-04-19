@@ -10,9 +10,17 @@ export interface IJob extends Document {
   input: string;
   result?: string;
   error?: string;
+  failureReason?: string;
   budgetCents: number;
+  assignedProviderId?: string;
+  retryCount: number;
+  startedAt?: Date;
+  completedAt?: Date;
+  actualRuntimeSeconds?: number;
+  jobCostCents?: number;
   providerPayoutCents?: number;
   platformFeeCents?: number;
+  proofHash?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -33,9 +41,17 @@ const JobSchema = new Schema<IJob>(
     input: { type: String, required: true },
     result: { type: String },
     error: { type: String },
+    failureReason: { type: String },
     budgetCents: { type: Number, default: 500 },
+    assignedProviderId: { type: String },
+    retryCount: { type: Number, default: 0 },
+    startedAt: { type: Date },
+    completedAt: { type: Date },
+    actualRuntimeSeconds: { type: Number },
+    jobCostCents: { type: Number },
     providerPayoutCents: { type: Number },
     platformFeeCents: { type: Number },
+    proofHash: { type: String },
   },
   { timestamps: true }
 );

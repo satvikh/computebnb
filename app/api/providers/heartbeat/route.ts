@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import dbConnect from "@/lib/db";
+import { formatProvider, getDbUnavailablePayload } from "@/lib/marketplace";
 import { Provider } from "@/lib/models";
 
 const schema = z.object({
@@ -8,39 +9,30 @@ const schema = z.object({
 });
 
 export async function POST(request: Request) {
-  await dbConnect();
-  // TODO: Validate provider token before accepting heartbeat updates.
-  const input = schema.parse(await request.json());
+  try {
+    await dbConnect();
+    const input = schema.parse(await request.json());
 
-  const provider = await Provider.findByIdAndUpdate(
-    input.providerId,
-    {
-      $set: { lastHeartbeatAt: new Date() },
-      // Keep "busy" if already busy, otherwise set to "online"
-    },
-    { new: true }
-  );
+    const provider = await Provider.findByIdAndUpdate(
+      input.providerId,
+      { $set: { lastHeartbeatAt: new Date() } },
+      { new: true }
+    );
 
-  if (!provider) {
-    return NextResponse.json({ error: "Provider not found" }, { status: 404 });
+    if (!provider) {
+      return NextResponse.json({ error: "Provider not found" }, { status: 404 });
+    }
+
+    if (provider.status !== "busy") {
+      provider.status = "online";
+      await provider.save();
+    }
+
+    return NextResponse.json({ provider: formatProvider(provider) });
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("MONGODB_URI")) {
+      return NextResponse.json(getDbUnavailablePayload(), { status: 503 });
+    }
+    return NextResponse.json({ error: "Failed to process heartbeat" }, { status: 500 });
   }
-
-  // Only flip to online if not currently busy
-  if (provider.status !== "busy") {
-    provider.status = "online";
-    await provider.save();
-  }
-
-  return NextResponse.json({
-    provider: {
-      id: provider._id,
-      name: provider.name,
-      status: provider.status,
-      capabilities: provider.capabilities,
-      hourlyRateCents: provider.hourlyRateCents,
-      totalEarnedCents: provider.totalEarnedCents,
-      lastHeartbeatAt: provider.lastHeartbeatAt,
-      createdAt: provider.createdAt,
-    },
-  });
 }

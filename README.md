@@ -1,78 +1,102 @@
-# Computebnb
+# GPUbnb
 
-Computebnb is a hackathon MVP for a marketplace where people lend out spare laptop or desktop compute for lightweight AI jobs. Users submit jobs through a web app. Provider machines run a local Node.js CLI agent that registers the machine, polls for work, executes one job at a time, reports progress/results, and earns money in a mock internal ledger.
+GPUbnb is a hackathon marketplace for routing lightweight text-first AI jobs onto spare provider machines.
 
-Computebnb is not a decentralized training protocol, not a blockchain app, and not a desktop app. The web app is the control plane; the provider software is a CLI worker.
+The project now has one clear web story:
 
-## Architecture
+- the stylized marketplace web app is the main product surface
+- the Mongo-backed backend is the source of truth for jobs, providers, assignments, payouts, and event history
+- the desktop/Tauri provider runtime is in progress separately
 
-- `app/`: Next.js App Router pages and API routes.
-- `components/`: Small shadcn-style UI primitives and shared view components.
-- `lib/`: Shared TypeScript types, utilities, mock in-memory store, and MongoDB Atlas client helper.
-- `worker/`: Local provider CLI agent in Node.js/TypeScript.
-- `mongodb/`: Starter Atlas collection shapes, indexes, and seed data.
+This repo intentionally does **not** try to claim production-grade sandboxing, decentralized verification, or a global GPU cloud. It focuses on a truthful, legible marketplace loop:
 
 ```text
-User submits job
-  -> Next.js API creates queued job
-  -> simple scheduler assigns to an online provider
-  -> provider CLI polls and receives assignment
-  -> provider CLI reports start/progress/complete/fail
-  -> API updates job, events, and mock 80/20 ledger split
+submit text job
+  -> backend creates queued job
+  -> scheduler assigns a recent online provider
+  -> provider worker starts and reports progress
+  -> backend records runtime, proof hash, payout, fee, and events
+  -> stylized web dashboard reflects the result
 ```
 
-## MVP Scope
+## What’s Implemented
 
-Included:
+### Web
 
-- Landing page for the product story.
-- Providers page with machine status, capabilities, rates, and mock earnings.
-- Jobs page with lifecycle status.
-- Job submission page.
-- Result page with input, output, ledger, and event log.
-- Provider registration API.
-- Provider heartbeat API.
-- Job creation and lookup APIs.
-- Worker polling API.
-- Job start/progress/complete/fail APIs.
-- Local worker CLI skeleton.
-- MongoDB Atlas collection specs for `providers`, `jobs`, `assignments`, and `job_events`.
+- Stylized landing page and marketplace-themed dashboard
+- Backend-driven marketplace dashboard at `/dashboard`
+- Backend-driven providers view at `/providers`
+- Backend-driven jobs board at `/jobs`
+- Styled job submission flow at `/jobs/new`
+- Styled results/ledger view at `/jobs/[id]/results`
+- Temporary frontend-only demo session shortcut with `Ctrl+K`
 
-Stubbed for hackathon speed:
+### Backend
 
-- Auth and user accounts.
-- Real MongoDB Atlas persistence in route handlers.
-- Secure provider token validation.
-- Capability-aware scheduling.
-- Sandboxed execution.
-- File/object storage for larger job payloads.
-- Production billing and payout settlement.
+- Mongo/Mongoose models for providers, jobs, assignments, and job events
+- Provider registration and heartbeat APIs
+- Job creation and lookup APIs
+- Worker poll/start/progress/complete/fail APIs
+- Simple scheduler with basic stale-assignment cleanup
+- Runtime-based pricing with budget cap
+- 80/20 provider payout / platform fee split
+- Basic trust signals:
+  - provider completed jobs
+  - provider failed jobs
+  - provider success rate
+  - last heartbeat
+  - job runtime
+  - proof hash
+  - event timeline
 
-## Local Agent Design
+## Current Scope
 
-The provider CLI lives in `worker/` and follows this loop:
+This pass is intentionally limited to:
 
-1. Register the machine unless `Computebnb_PROVIDER_ID` is already configured.
-2. Send a heartbeat every few seconds.
-3. Poll the control plane for one assigned job.
-4. Execute the job locally through `worker/executor.ts`.
-5. Report start, progress, completion, or failure.
-6. Return to polling.
+- text-only inputs and outputs
+- basic scheduling and retries
+- backend truth for marketplace pages
+- lightweight demo-mode auth bypass
 
-The executor is intentionally mocked. It gives the demo a believable local-worker flow without pulling in heavyweight AI runtimes during a 24-hour build.
+Out of scope for now:
 
-## Setup
+- real user auth
+- secure provider token enforcement everywhere
+- object/file storage
+- desktop/Tauri native integration
+- heavy artifact processing
+- production infra hardening
+
+## Project Structure
+
+- `app/`: Next.js App Router pages and API routes
+- `app/_components/`: stylized marketplace UI primitives and shell components
+- `lib/models/`: Mongo/Mongoose schemas
+- `lib/marketplace.ts`: shared formatting and dashboard/provider/job query helpers
+- `lib/scheduling.ts`: assignment and stale-job logic
+- `worker/`: lightweight CLI worker used for the current execution loop
+- `src-tauri/`: provider desktop shell in progress
+
+## Environment
+
+Create `.env.local` from `.env.example`.
+
+Important values:
+
+```bash
+MONGODB_URI=...
+MONGODB_DB_NAME=gpubnb
+GPUBNB_API_URL=http://localhost:3000
+```
+
+The app now builds cleanly even when Mongo is not configured, but backend-powered marketplace pages and APIs will show database-unavailable behavior until `MONGODB_URI` is set.
+
+## Local Development
 
 Install dependencies:
 
 ```bash
 npm install
-```
-
-Create local env:
-
-```bash
-cp .env.example .env.local
 ```
 
 Run the web app:
@@ -81,45 +105,31 @@ Run the web app:
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
-
-In a second terminal, run the provider agent:
+Optional: run the lightweight worker loop in another terminal:
 
 ```bash
 npm run worker
 ```
 
-Optional MongoDB Atlas setup:
-
-1. Create a MongoDB Atlas cluster.
-2. Create a database named `Computebnb`.
-3. Review `mongodb/schema.md` for the collection shapes.
-4. Run `mongodb/indexes.js` with `mongosh` to create starter indexes.
-5. Run `mongodb/seed.js` with `mongosh` for sample provider/job data.
-6. Fill in `MONGODB_URI` and `MONGODB_DB_NAME`.
-7. Replace the mock store calls in API routes with MongoDB collection queries.
-
 ## Demo Flow
 
-1. Start `npm run dev`.
-2. Start `npm run worker` in another terminal.
-3. Open the providers page and confirm a provider is online.
-4. Submit a job from `/jobs/new`.
-5. Watch the worker terminal poll, start, report progress, and complete the job.
-6. Open the job result page to show output, events, and the 80% provider payout / 20% platform fee split.
+1. Start the web app.
+2. Register or heartbeat at least one provider through the worker flow.
+3. Open `/dashboard` to show live marketplace summary.
+4. Submit a text job from `/jobs/new`.
+5. Let the worker pick it up and complete it.
+6. Open `/jobs/[id]/results` to show:
+   - assigned provider
+   - runtime
+   - final job cost
+   - provider payout
+   - platform fee
+   - proof hash
+   - event trail
 
-## Useful Scripts
+## Quality Checks
 
-- `npm run dev`: start the Next.js app.
-- `npm run build`: build the Next.js app.
-- `npm run start`: serve the built app.
-- `npm run worker`: run the local provider CLI.
-- `npm run worker:dev`: run the provider CLI in watch mode.
+- `npm run lint`
+- `npm run build`
 
-## Next Five Implementation Steps
-
-1. Replace `lib/mock-store.ts` with MongoDB Atlas-backed repositories or route-handler queries.
-2. Add provider token hashing and validation for all worker APIs.
-3. Implement a tiny scheduler transaction that atomically assigns one queued job to one online provider.
-4. Add a real executor adapter for one safe demo job type, such as local shell commands from an allowlist or a small local model call.
-5. Add live refresh on job/result pages through lightweight polling or MongoDB change streams.
+Both should pass before demoing.

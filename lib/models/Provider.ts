@@ -6,6 +6,9 @@ export interface IProvider extends Document {
   capabilities: string[];
   hourlyRateCents: number;
   totalEarnedCents: number;
+  completedJobs: number;
+  failedJobs: number;
+  successRate: number;
   tokenHash?: string;
   lastHeartbeatAt?: Date;
   createdAt: Date;
@@ -23,6 +26,9 @@ const ProviderSchema = new Schema<IProvider>(
     capabilities: { type: [String], default: ["cpu", "node"] },
     hourlyRateCents: { type: Number, default: 250 },
     totalEarnedCents: { type: Number, default: 0 },
+    completedJobs: { type: Number, default: 0 },
+    failedJobs: { type: Number, default: 0 },
+    successRate: { type: Number, default: 100 },
     tokenHash: { type: String },
     lastHeartbeatAt: { type: Date },
   },
