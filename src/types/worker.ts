@@ -101,6 +101,19 @@ export interface WorkerRuntimeSnapshot {
   workerLogs: JobLog[];
 }
 
+export interface DockerHealth {
+  ok: boolean;
+  detail: string;
+}
+
+export interface SandboxRunnerStatus {
+  running: boolean;
+  managed: boolean;
+  pid: number | null;
+  url: string;
+  detail: string;
+}
+
 export interface WorkerStatusChangedEvent {
   type: "worker_status_changed";
   status: WorkerStatus;

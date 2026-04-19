@@ -13,7 +13,11 @@ pub fn run() {
             worker_manager::resume_worker,
             worker_manager::get_worker_status,
             worker_manager::update_worker_settings,
-            worker_manager::emergency_stop
+            worker_manager::emergency_stop,
+            worker_manager::check_docker_health,
+            worker_manager::get_sandbox_runner_status,
+            worker_manager::start_sandbox_runner,
+            worker_manager::stop_sandbox_runner
         ])
         .run(tauri::generate_context!())
         .expect("error while running ComputeBNB provider");

@@ -1,7 +1,9 @@
 use std::{
     fs,
     io::Write,
-    process::{Command, Stdio},
+    net::TcpStream,
+    path::PathBuf,
+    process::{Child, Command, Stdio},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -27,6 +29,7 @@ const SNAPSHOT_EVENT: &str = "worker-snapshot";
 pub struct WorkerManager {
     runtime: Arc<Mutex<WorkerRuntime>>,
     task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    sandbox_runner: Arc<Mutex<Option<Child>>>,
 }
 
 impl WorkerManager {
@@ -34,6 +37,7 @@ impl WorkerManager {
         Self {
             runtime: Arc::new(Mutex::new(WorkerRuntime::new())),
             task: Arc::new(Mutex::new(None)),
+            sandbox_runner: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -73,6 +77,41 @@ impl WorkerManager {
     fn stop_runner(&self) {
         if let Some(task) = self.task.lock().expect("worker task poisoned").take() {
             task.abort();
+        }
+    }
+
+    fn sandbox_status(&self) -> SandboxRunnerStatus {
+        let mut managed = false;
+        let mut pid = None;
+
+        {
+            let mut child_guard = self
+                .sandbox_runner
+                .lock()
+                .expect("sandbox runner process poisoned");
+            if let Some(child) = child_guard.as_mut() {
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    *child_guard = None;
+                } else {
+                    managed = true;
+                    pid = Some(child.id());
+                }
+            }
+        }
+
+        let http_online = TcpStream::connect(("127.0.0.1", 4317)).is_ok();
+        SandboxRunnerStatus {
+            running: http_online || managed,
+            managed,
+            pid,
+            url: "http://localhost:4317".to_string(),
+            detail: if http_online {
+                "worker-runner is reachable on localhost:4317".to_string()
+            } else if managed {
+                "worker-runner process is starting".to_string()
+            } else {
+                "worker-runner is not running".to_string()
+            },
         }
     }
 
@@ -225,6 +264,23 @@ pub struct WorkerRuntimeSnapshot {
     settings: WorkerSettings,
     network_online: bool,
     worker_logs: Vec<JobLog>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DockerHealth {
+    ok: bool,
+    detail: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxRunnerStatus {
+    running: bool,
+    managed: bool,
+    pid: Option<u32>,
+    url: String,
+    detail: String,
 }
 
 struct WorkerRuntime {
@@ -1068,6 +1124,113 @@ pub fn emergency_stop(
     manager.snapshot()
 }
 
+#[tauri::command]
+pub fn check_docker_health() -> DockerHealth {
+    match run_shell("docker version --format '{{.Server.Version}}'", None) {
+        Ok(version) => DockerHealth {
+            ok: true,
+            detail: format!("Docker daemon available ({})", version.trim()),
+        },
+        Err(error) => DockerHealth {
+            ok: false,
+            detail: format!("Docker unavailable: {error}"),
+        },
+    }
+}
+
+#[tauri::command]
+pub fn get_sandbox_runner_status(
+    manager: tauri::State<'_, WorkerManager>,
+) -> SandboxRunnerStatus {
+    manager.sandbox_status()
+}
+
+#[tauri::command]
+pub fn start_sandbox_runner(
+    app: AppHandle,
+    manager: tauri::State<'_, WorkerManager>,
+) -> Result<SandboxRunnerStatus, String> {
+    let current = manager.sandbox_status();
+    if current.running {
+        return Ok(current);
+    }
+
+    let worker_dir = worker_runner_dir()?;
+    let child = spawn_shell("npm run start", Some(worker_dir.clone()))?;
+    {
+        let mut child_guard = manager
+            .sandbox_runner
+            .lock()
+            .expect("sandbox runner process poisoned");
+        *child_guard = Some(child);
+    }
+
+    {
+        let mut runtime = manager.runtime.lock().expect("worker runtime poisoned");
+        let log = runtime.push_log(
+            LogLevel::Success,
+            &format!(
+                "Docker sandbox runner started from {}.",
+                worker_dir.to_string_lossy()
+            ),
+        );
+        emit_worker_event(
+            &app,
+            LOG_EMITTED_EVENT,
+            ActivityLogEvent {
+                event_type: "log_emitted",
+                log,
+                job_id: None,
+            },
+        );
+    }
+    manager.emit_snapshot(&app);
+
+    Ok(manager.sandbox_status())
+}
+
+#[tauri::command]
+pub fn stop_sandbox_runner(
+    app: AppHandle,
+    manager: tauri::State<'_, WorkerManager>,
+) -> Result<SandboxRunnerStatus, String> {
+    let stopped_managed_process = {
+        let mut child_guard = manager
+            .sandbox_runner
+            .lock()
+            .expect("sandbox runner process poisoned");
+        if let Some(mut child) = child_guard.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+            true
+        } else {
+            false
+        }
+    };
+
+    {
+        let mut runtime = manager.runtime.lock().expect("worker runtime poisoned");
+        let message = if stopped_managed_process {
+            "Docker sandbox runner stopped."
+        } else {
+            "No app-managed sandbox runner process was active."
+        };
+        let log = runtime.push_log(LogLevel::Warning, message);
+        emit_worker_event(
+            &app,
+            LOG_EMITTED_EVENT,
+            ActivityLogEvent {
+                event_type: "log_emitted",
+                log,
+                job_id: None,
+            },
+        );
+    }
+    manager.emit_snapshot(&app);
+
+    Ok(manager.sandbox_status())
+}
+
 fn seed_recent_jobs() -> Vec<Job> {
     vec![
         completed_job(
@@ -1267,6 +1430,69 @@ fn sanitize_id(value: &str) -> String {
 fn limit_output(value: &str) -> String {
     let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
     normalized.chars().take(700).collect()
+}
+
+fn worker_runner_dir() -> Result<PathBuf, String> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .ok_or_else(|| "unable to resolve repository root".to_string())?;
+    let worker_dir = repo_root.join("worker-runner");
+    if worker_dir.join("package.json").exists() {
+        Ok(worker_dir)
+    } else {
+        Err(format!(
+            "worker-runner package not found at {}",
+            worker_dir.to_string_lossy()
+        ))
+    }
+}
+
+fn spawn_shell(command: &str, cwd: Option<PathBuf>) -> Result<Child, String> {
+    let mut process = shell_command(command);
+    if let Some(cwd) = cwd {
+        process.current_dir(cwd);
+    }
+    process
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("unable to spawn `{command}`: {error}"))
+}
+
+fn run_shell(command: &str, cwd: Option<PathBuf>) -> Result<String, String> {
+    let mut process = shell_command(command);
+    if let Some(cwd) = cwd {
+        process.current_dir(cwd);
+    }
+    let output = process
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("unable to run `{command}`: {error}"))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() {
+            format!("command exited with {}", output.status)
+        } else {
+            stderr
+        })
+    }
+}
+
+fn shell_command(command: &str) -> Command {
+    if cfg!(windows) {
+        let mut process = Command::new("cmd.exe");
+        process.arg("/C").arg(command);
+        process
+    } else {
+        let mut process = Command::new("/bin/zsh");
+        process.arg("-lc").arg(command);
+        process
+    }
 }
 
 fn local_machine_name() -> String {

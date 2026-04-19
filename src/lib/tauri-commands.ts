@@ -1,4 +1,4 @@
-import type { Machine, WorkerRuntimeSnapshot, WorkerSettings } from "@/src/types/worker";
+import type { DockerHealth, Machine, SandboxRunnerStatus, WorkerRuntimeSnapshot, WorkerSettings } from "@/src/types/worker";
 
 export const WORKER_COMMANDS = {
   detectMachine: "detect_machine",
@@ -9,7 +9,11 @@ export const WORKER_COMMANDS = {
   resumeWorker: "resume_worker",
   getWorkerStatus: "get_worker_status",
   updateWorkerSettings: "update_worker_settings",
-  emergencyStop: "emergency_stop"
+  emergencyStop: "emergency_stop",
+  checkDockerHealth: "check_docker_health",
+  getSandboxRunnerStatus: "get_sandbox_runner_status",
+  startSandboxRunner: "start_sandbox_runner",
+  stopSandboxRunner: "stop_sandbox_runner"
 } as const;
 
 function hasTauriRuntime() {
@@ -59,4 +63,20 @@ export async function invokeUpdateWorkerSettings(settings: WorkerSettings) {
 
 export async function invokeEmergencyStop() {
   return invokeCommand<WorkerRuntimeSnapshot>(WORKER_COMMANDS.emergencyStop);
+}
+
+export async function invokeCheckDockerHealth() {
+  return invokeCommand<DockerHealth>(WORKER_COMMANDS.checkDockerHealth);
+}
+
+export async function invokeGetSandboxRunnerStatus() {
+  return invokeCommand<SandboxRunnerStatus>(WORKER_COMMANDS.getSandboxRunnerStatus);
+}
+
+export async function invokeStartSandboxRunner() {
+  return invokeCommand<SandboxRunnerStatus>(WORKER_COMMANDS.startSandboxRunner);
+}
+
+export async function invokeStopSandboxRunner() {
+  return invokeCommand<SandboxRunnerStatus>(WORKER_COMMANDS.stopSandboxRunner);
 }
