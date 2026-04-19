@@ -20,7 +20,8 @@ export class RunnerService {
   submit(request: JobRequest, hooks: RunnerHooks = {}): JobRecord {
     const job = normalizeJob(request, {
       timeoutMs: this.config.defaultTimeoutMs,
-      logLimitBytes: this.config.maxLogBytes
+      logLimitBytes: this.config.maxLogBytes,
+      allowCustomCommands: this.config.allowCustomCommands
     });
     const record = this.store.create(toJobRecord(job), job.limits.logLimitBytes);
     this.hooks.set(job.id, hooks);
