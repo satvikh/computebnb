@@ -5,6 +5,7 @@ import { ActiveJobCard } from "@/src/components/worker/active-job-card";
 import { AppShell } from "@/src/components/worker/app-shell";
 import { RecentJobsTable } from "@/src/components/worker/recent-jobs-table";
 import { ResourceUsageCard } from "@/src/components/worker/resource-usage-card";
+import { SandboxRunnerPanel } from "@/src/components/worker/sandbox-runner-panel";
 import { useWorker } from "@/src/hooks/use-worker";
 
 export default function JobsPage() {
@@ -17,6 +18,7 @@ export default function JobsPage() {
           <RecentJobsTable jobs={state.recentJobs} />
         </div>
         <div className="space-y-5">
+          <SandboxRunnerPanel />
           <ResourceUsageCard state={state} />
           <ActivityLogPanel logs={[...(state.activeJob?.logs ?? []), ...state.workerLogs]} />
         </div>
