@@ -44,10 +44,10 @@ export async function assignNextJob(): Promise<IAssignment | null> {
     jobId: claimed._id,
     providerId: provider._id,
     status: "assigned",
-  }).catch(async () => {
+  }).catch(async (caught: unknown) => {
     await Job.findByIdAndUpdate(claimed._id, { status: "queued" });
     await Provider.findByIdAndUpdate(provider._id, { status: "online" });
-    throw error;
+    throw caught;
   });
 
   // 5. Log the event

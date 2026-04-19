@@ -58,7 +58,7 @@ export default async function ResultsPage({ params }: { params: Promise<{ id: st
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
           {events.map((event) => (
-            <div key={event.id} className="border-b pb-3 last:border-0 last:pb-0">
+            <div key={String(event._id)} className="border-b pb-3 last:border-0 last:pb-0">
               <p className="font-medium">{event.type}: {event.message}</p>
               <p className="text-muted-foreground">{event.createdAt.toISOString()}</p>
             </div>
