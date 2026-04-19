@@ -5,6 +5,8 @@ import { Job, Assignment, Provider, JobEvent } from "@/lib/models";
 import { buildProofHash, calculateSuccessRate, formatJob, getDbUnavailablePayload } from "@/lib/marketplace";
 import { calculateRuntimePricing } from "@/lib/pricing";
 import { assignNextJob } from "@/lib/scheduling";
+import { recordCompletedJobLedger } from "@/lib/ledger";
+import { requireProvider } from "@/lib/provider-auth";
 
 const schema = z.object({
   providerId: z.string().min(1),
@@ -20,6 +22,22 @@ export async function POST(
     await dbConnect();
     const { id } = await params;
     const input = schema.parse(await request.json());
+    const auth = await requireProvider(request, input.providerId);
+    if (auth.response) return auth.response;
+
+    const existingAssignment = await Assignment.findOne({
+      jobId: id,
+      providerId: input.providerId,
+      status: "completed"
+    });
+    if (existingAssignment) {
+      const existingJob = await Job.findById(id);
+      const existingProvider = await Provider.findById(input.providerId);
+      if (!existingJob) {
+        return NextResponse.json({ error: "Job not found" }, { status: 404 });
+      }
+      return NextResponse.json({ job: formatJob(existingJob, existingProvider?.name ?? null) });
+    }
 
     const assignment = await Assignment.findOne({
       jobId: id,
@@ -66,8 +84,15 @@ export async function POST(
     job.proofHash = buildProofHash(input.result);
     await job.save();
 
+    await recordCompletedJobLedger({
+      jobId: job._id,
+      providerId: provider._id,
+      budgetCents: jobCostCents,
+      providerPayoutCents,
+      platformFeeCents
+    });
+
     provider.status = "online";
-    provider.totalEarnedCents += providerPayoutCents;
     provider.completedJobs += 1;
     provider.successRate = calculateSuccessRate(provider.completedJobs, provider.failedJobs);
     await provider.save();

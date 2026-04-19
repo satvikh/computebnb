@@ -2,6 +2,7 @@ import { MarketplaceShell } from "@/app/_components/marketplace-shell";
 import { StatusPill } from "@/app/_components/chrome";
 import { listProvidersSummary } from "@/lib/marketplace";
 import { isDbConfigured } from "@/lib/db";
+import { markStaleProvidersOffline } from "@/lib/scheduling";
 
 function centsToDollars(cents: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
@@ -14,6 +15,7 @@ export default async function ProvidersPage() {
 
   try {
     if (isDbConfigured()) {
+      await markStaleProvidersOffline();
       providers = await listProvidersSummary();
     }
   } catch {

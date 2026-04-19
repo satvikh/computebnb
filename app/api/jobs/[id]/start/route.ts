@@ -3,6 +3,7 @@ import { z } from "zod";
 import dbConnect from "@/lib/db";
 import { Job, Assignment, JobEvent } from "@/lib/models";
 import { formatJob, getDbUnavailablePayload } from "@/lib/marketplace";
+import { requireProvider } from "@/lib/provider-auth";
 
 const schema = z.object({
   providerId: z.string().min(1),
@@ -16,6 +17,8 @@ export async function POST(
     await dbConnect();
     const { id } = await params;
     const input = schema.parse(await request.json().catch(() => ({})));
+    const auth = await requireProvider(request, input.providerId);
+    if (auth.response) return auth.response;
 
     const assignment = await Assignment.findOne({
       jobId: id,

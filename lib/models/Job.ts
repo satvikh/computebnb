@@ -8,6 +8,8 @@ export interface IJob extends Document {
   type: JobType;
   status: JobStatus;
   input: string;
+  requiredCapabilities: string[];
+  runnerPayload?: Record<string, unknown>;
   result?: string;
   error?: string;
   budgetCents: number;
@@ -38,6 +40,8 @@ const JobSchema = new Schema<IJob>(
       default: "queued",
     },
     input: { type: String, required: true },
+    requiredCapabilities: { type: [String], default: ["cpu"] },
+    runnerPayload: { type: Schema.Types.Mixed },
     result: { type: String },
     error: { type: String },
     budgetCents: { type: Number, default: 500 },
@@ -56,6 +60,7 @@ const JobSchema = new Schema<IJob>(
 
 // Indexes
 JobSchema.index({ status: 1 });
+JobSchema.index({ status: 1, createdAt: 1 });
 JobSchema.index({ createdAt: -1 });
 JobSchema.index({ assignedProviderId: 1 });
 

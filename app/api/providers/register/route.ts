@@ -3,7 +3,7 @@ import { z } from "zod";
 import dbConnect from "@/lib/db";
 import { calculateSuccessRate, formatProvider, getDbUnavailablePayload } from "@/lib/marketplace";
 import { Provider } from "@/lib/models";
-import crypto from "crypto";
+import { createProviderToken, hashProviderToken } from "@/lib/provider-auth";
 
 const schema = z.object({
   name: z.string().min(1),
@@ -17,8 +17,8 @@ export async function POST(request: Request) {
     const body = await request.json();
     const input = schema.parse(body);
 
-    const token = `tok_${crypto.randomBytes(16).toString("hex")}`;
-    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+    const token = createProviderToken();
+    const tokenHash = hashProviderToken(token);
 
     const provider = await Provider.create({
       name: input.name,

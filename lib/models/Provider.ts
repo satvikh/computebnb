@@ -11,9 +11,6 @@ export interface IProvider extends Document {
   successRate: number;
   tokenHash?: string;
   lastHeartbeatAt?: Date;
-  completedJobs: number;
-  failedJobs: number;
-  successRate: number;
   trustScore: number;
   createdAt: Date;
   updatedAt: Date;
@@ -35,9 +32,6 @@ const ProviderSchema = new Schema<IProvider>(
     successRate: { type: Number, default: 100 },
     tokenHash: { type: String },
     lastHeartbeatAt: { type: Date },
-    completedJobs: { type: Number, default: 0 },
-    failedJobs: { type: Number, default: 0 },
-    successRate: { type: Number, default: 100 },
     trustScore: { type: Number, default: 100 },
   },
   { timestamps: true }
@@ -48,6 +42,8 @@ ProviderSchema.index({ status: 1 });
 ProviderSchema.index({ lastHeartbeatAt: 1 });
 
 // Prevent model recompilation in Next.js hot reload
+ProviderSchema.index({ status: 1, lastHeartbeatAt: -1 });
+
 const Provider: Model<IProvider> =
   mongoose.models.Provider || mongoose.model<IProvider>("Provider", ProviderSchema);
 

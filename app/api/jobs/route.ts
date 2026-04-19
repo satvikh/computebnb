@@ -9,6 +9,8 @@ const schema = z.object({
   title: z.string().min(1),
   type: z.enum(["text_generation", "image_caption", "embedding", "shell_demo"]),
   input: z.string().min(1),
+  requiredCapabilities: z.array(z.string()).optional(),
+  runnerPayload: z.record(z.unknown()).optional(),
   budgetCents: z.coerce.number().int().positive().optional(),
 });
 
@@ -39,6 +41,8 @@ export async function POST(request: Request) {
       title: input.title,
       type: input.type,
       input: input.input,
+      requiredCapabilities: input.requiredCapabilities ?? capabilitiesForType(input.type),
+      runnerPayload: input.runnerPayload,
       budgetCents: input.budgetCents ?? 500,
       status: "queued"
     });
@@ -62,4 +66,10 @@ export async function POST(request: Request) {
     }
     throw error;
   }
+}
+
+function capabilitiesForType(type: z.infer<typeof schema>["type"]) {
+  if (type === "shell_demo") return ["cpu", "docker"];
+  if (type === "embedding" || type === "text_generation") return ["cpu", "node"];
+  return ["cpu"];
 }

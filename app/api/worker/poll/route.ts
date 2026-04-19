@@ -4,6 +4,7 @@ import dbConnect from "@/lib/db";
 import { formatJob, getDbUnavailablePayload } from "@/lib/marketplace";
 import { Provider, Job } from "@/lib/models";
 import { getAssignmentForProvider, assignNextJob, reapStaleAssignments } from "@/lib/scheduling";
+import { requireProvider } from "@/lib/provider-auth";
 
 const schema = z.object({
   providerId: z.string().min(1),
@@ -14,6 +15,8 @@ export async function POST(request: Request) {
     await dbConnect();
     await reapStaleAssignments();
     const input = schema.parse(await request.json());
+    const auth = await requireProvider(request, input.providerId);
+    if (auth.response) return auth.response;
 
     const provider = await Provider.findByIdAndUpdate(
       input.providerId,

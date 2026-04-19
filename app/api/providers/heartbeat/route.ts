@@ -3,6 +3,7 @@ import { z } from "zod";
 import dbConnect from "@/lib/db";
 import { formatProvider, getDbUnavailablePayload } from "@/lib/marketplace";
 import { Provider } from "@/lib/models";
+import { requireProvider } from "@/lib/provider-auth";
 
 const schema = z.object({
   providerId: z.string().min(1),
@@ -12,6 +13,8 @@ export async function POST(request: Request) {
   try {
     await dbConnect();
     const input = schema.parse(await request.json());
+    const auth = await requireProvider(request, input.providerId);
+    if (auth.response) return auth.response;
 
     const provider = await Provider.findByIdAndUpdate(
       input.providerId,

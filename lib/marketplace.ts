@@ -51,6 +51,8 @@ export function formatJob(
     type: string;
     status: string;
     input: string;
+    requiredCapabilities?: string[];
+    runnerPayload?: Record<string, unknown> | null;
     result?: string | null;
     error?: string | null;
     failureReason?: string | null;
@@ -75,6 +77,8 @@ export function formatJob(
     type: job.type,
     status: job.status,
     input: job.input,
+    requiredCapabilities: job.requiredCapabilities ?? [],
+    runnerPayload: job.runnerPayload ?? null,
     result: job.result ?? null,
     error: job.error ?? null,
     failureReason: job.failureReason ?? null,
